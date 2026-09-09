@@ -518,37 +518,30 @@ pub extern "C" fn register_running_info_callback(
                 .build();
             let Ok(rt) = rt else { return };
             rt.block_on(async move {
-                let start = tokio::time::Instant::now();
-                let mut tick = tokio::time::interval(Duration::from_secs(3));
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // Two one-shot nudges so a split-tunnel config settles its
+                // learned routes once. No repeating timer: applyNetworkSettings
+                // flaps `reasserting` even on a no-op, so a steady stream of
+                // callbacks makes iOS drop/re-establish the tunnel forever.
+                let nudge = callback;
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    nudge();
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    nudge();
+                });
                 loop {
-                    tokio::select! {
-                        _ = tick.tick() => {
-                            // Routes/proxy-cidrs can settle with no GlobalCtxEvent,
-                            // and just after PeerAdded the route entry has no
-                            // proxy_cidrs yet. Nudge the NE while things settle.
-                            if start.elapsed() < Duration::from_secs(60) {
+                    match ev.recv().await {
+                        Ok(event) => match event {
+                            GlobalCtxEvent::DhcpIpv4Changed(_, _)
+                            | GlobalCtxEvent::DhcpIpv4Conflicted(_)
+                            | GlobalCtxEvent::ProxyCidrsUpdated(_, _, _, _)
+                            | GlobalCtxEvent::ConfigPatched(_) => {
                                 callback();
                             }
-                        }
-                        recv = ev.recv() => match recv {
-                            Ok(event) => match event {
-                                GlobalCtxEvent::DhcpIpv4Changed(_, _)
-                                | GlobalCtxEvent::DhcpIpv4Conflicted(_)
-                                | GlobalCtxEvent::ProxyCidrsUpdated(_, _, _, _)
-                                | GlobalCtxEvent::PublicIpv6Changed(_, _)
-                                | GlobalCtxEvent::PublicIpv6RoutesUpdated(_, _)
-                                | GlobalCtxEvent::PeerAdded(_)
-                                | GlobalCtxEvent::PeerRemoved(_)
-                                | GlobalCtxEvent::TunDeviceReady(_)
-                                | GlobalCtxEvent::ConfigPatched(_) => {
-                                    callback();
-                                }
-                                _ => {}
-                            },
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                            _ => {}
                         },
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     }
                 }
             });
