@@ -51,12 +51,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var lastOptions: EasyTierOptions?
     private var lastAppliedSettings: TunnelNetworkSettingsSnapshot?
     private var needReapplySettings: Bool = false
+    private var wakeHealInFlight = false
 
     private func resetTunnelSessionState() {
         lastOptions = nil
         lastAppliedSettings = nil
         needReapplySettings = false
         settingsApplyGeneration = nil
+        wakeHealInFlight = false
         reasserting = false
     }
 
@@ -484,74 +486,47 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     
     override func wake() {
         logger.warning("wake(): triggered")
-        settingsQueue.asyncAfter(deadline: .now() + 15) { [weak self] in
-            self?.healAfterWake(step: 0, baseline: nil)
-        }
-    }
-
-    private func totalRxBytes() -> Int? {
-        var jsonPtr: UnsafePointer<CChar>? = nil
-        var errPtr: UnsafePointer<CChar>? = nil
-        let rc = get_running_info(&jsonPtr, &errPtr)
-        let snapshot = extractRustString(jsonPtr)
-        _ = extractRustString(errPtr)
-        guard rc == 0, let snapshot, snapshot.contains("\"running\":true") else { return nil }
-        var total = 0
-        var cursor = snapshot.startIndex
-        while let r = snapshot.range(of: "\"rx_bytes\":", range: cursor..<snapshot.endIndex) {
-            var k = r.upperBound
-            var digits = ""
-            while k < snapshot.endIndex, snapshot[k].isNumber {
-                digits.append(snapshot[k])
-                k = snapshot.index(after: k)
+        settingsQueue.async { [weak self] in
+            guard let self, let generation = self.activeTunnelGeneration else { return }
+            guard !self.wakeHealInFlight else {
+                logger.info("wake(): heal already in flight, ignoring")
+                return
             }
-            total += Int(digits) ?? 0
-            cursor = k
+            self.wakeHealInFlight = true
+            self.reasserting = true
+            self.settingsQueue.asyncAfter(deadline: .now() + 15) { [weak self] in
+                self?.wakeHealSample(generation: generation)
+            }
         }
-        return total
     }
 
-    private func healAfterWake(step: Int, baseline: Int?) {
-        guard self.activeTunnelGeneration != nil else { return }
-        let current = totalRxBytes()
-
-        if let current, let baseline, current > baseline {
-            logger.info("wake(): traffic moving (\(baseline) -> \(current)), healthy")
-            self.reasserting = false
-            self.enqueueSettingsUpdate()
+    private func wakeHealSample(generation: UInt64) {
+        guard self.activeTunnelGeneration == generation else {
+            self.wakeHealInFlight = false
             return
         }
-
-        switch step {
-        case 0:
-            // take the baseline, re-check shortly
-            self.reasserting = true
-            self.settingsQueue.asyncAfter(deadline: .now() + 6) { [weak self] in
-                self?.healAfterWake(step: 1, baseline: current)
-            }
-        case 1:
-            // still stalled after the grace period: drop every peer conn so
-            // the manual connectors re-dial. No destructive restart.
-            logger.warning("wake(): traffic stalled, force_reconnect")
-            var errPtr: UnsafePointer<CChar>? = nil
-            _ = force_reconnect(&errPtr)
-            _ = extractRustString(errPtr)
-            self.settingsQueue.asyncAfter(deadline: .now() + 12) { [weak self] in
-                self?.healAfterWake(step: 2, baseline: baseline)
-            }
-        case 2...6:
-            // keep watching; the top of this func resyncs + clears reasserting
-            // as soon as traffic returns.
-            self.settingsQueue.asyncAfter(deadline: .now() + 10) { [weak self] in
-                self?.healAfterWake(step: step + 1, baseline: baseline)
-            }
-        default:
-            // Gave it ~90s. Stop showing "reconnecting"; EasyTier's connector
-            // loop keeps retrying on its own and the info refresher will pick
-            // up any recovery.
-            logger.warning("wake(): recovery still pending, leaving it to EasyTier")
-            self.reasserting = false
+        // Monotonic across peer-conn churn: a re-dial (ours or EasyTier's) mints
+        // a fresh conn_id with a zeroed counter, but the Rust accumulator keeps
+        // climbing, so a plain before/after comparison stays correct.
+        let before = overlay_rx_total()
+        self.settingsQueue.asyncAfter(deadline: .now() + 5) { [weak self] in
+            self?.wakeHealDecide(generation: generation, before: before)
         }
+    }
+
+    private func wakeHealDecide(generation: UInt64, before: UInt64) {
+        self.wakeHealInFlight = false
+        guard self.activeTunnelGeneration == generation else { return }
+        self.reasserting = false
+        let after = overlay_rx_total()
+        if after > before {
+            logger.info("wake(): overlay rx \(before) -> \(after), moving, recovered on its own")
+            return
+        }
+        logger.warning("wake(): overlay rx stalled at \(before) ~20s after wake, force_reconnect")
+        var errPtr: UnsafePointer<CChar>? = nil
+        _ = force_reconnect(&errPtr)
+        _ = extractRustString(errPtr)
     }
 }
 

@@ -1289,6 +1289,7 @@ dependencies = [
 name = "easytier-ios"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "easytier",
  "easytier-core",
  "once_cell",

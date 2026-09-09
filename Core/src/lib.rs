@@ -1,8 +1,12 @@
 use std::{
+    collections::HashMap,
     ffi::CString,
     fs::File,
     io::{self, Seek, SeekFrom, Write},
-    sync::{Arc, Mutex, Once},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, Once,
+    },
     time::Duration,
 };
 
@@ -16,6 +20,7 @@ use easytier::{
     },
 };
 use easytier_core::{config::normalize_secure_mode_config, instance::manager::ConfigFileControl};
+use arc_swap::ArcSwapOption;
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
 use tokio::runtime::{Builder, Runtime};
@@ -40,29 +45,82 @@ static CTX: Lazy<Ctx> = Lazy::new(|| {
     Ctx { rt, manager }
 });
 
-static CURRENT: Lazy<Mutex<Option<Uuid>>> = Lazy::new(|| Mutex::new(None));
+static CURRENT: Lazy<ArcSwapOption<Uuid>> = Lazy::new(ArcSwapOption::empty);
 
 /// Overlay IPv6 from the running config; MyNodeInfo has no field for it.
-static CONFIGURED_IPV6: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+static CONFIGURED_IPV6: Lazy<ArcSwapOption<String>> = Lazy::new(ArcSwapOption::empty);
 
 /// Last serialized running-info snapshot. Refreshed by a background task on
 /// CTX.rt so the FFI getters never block the caller (startTunnel() calls
 /// get_running_info() synchronously on its settings queue).
-static INFO_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+static INFO_CACHE: Lazy<ArcSwapOption<String>> = Lazy::new(ArcSwapOption::empty);
 static REFRESHER: Once = Once::new();
+
+/// Lifetime count of overlay bytes received, accumulated per connection so it
+/// never goes backwards when a peer conn is torn down and re-dialed -- our
+/// force_reconnect and EasyTier's own reconnect both mint a fresh conn_id with
+/// a zeroed byte counter. Written only by the single info-refresher task; read
+/// lock-free by overlay_rx_total() from the FFI thread.
+static RX_ACCUM: AtomicU64 = AtomicU64::new(0);
+
+/// Fold one densified running-info snapshot into RX_ACCUM. `prev` is the
+/// refresher task's private per-conn rx from the previous tick.
+fn accumulate_rx(densified: &str, prev: &mut HashMap<String, u64>) {
+    let Ok(v) = serde_json::from_str::<Value>(densified) else {
+        return;
+    };
+    let mut cur: HashMap<String, u64> = HashMap::new();
+    collect_conn_rx(&v, &mut cur);
+    let mut delta: u64 = 0;
+    for (id, &rx) in &cur {
+        // new conn -> full rx; existing conn -> growth; a decrease within one
+        // conn_id (shouldn't happen) contributes 0.
+        delta = delta.saturating_add(rx.saturating_sub(prev.get(id).copied().unwrap_or(0)));
+    }
+    if delta > 0 {
+        RX_ACCUM.fetch_add(delta, Ordering::Relaxed);
+    }
+    *prev = cur;
+}
+
+/// conn_id -> stats.rx_bytes for every PeerConnInfo in the tree, deduped by
+/// conn_id (a conn appears under both `peers` and `peer_route_pairs`).
+fn collect_conn_rx(v: &Value, out: &mut HashMap<String, u64>) {
+    match v {
+        Value::Object(m) => {
+            if let Some(Value::String(id)) = m.get("conn_id") {
+                let rx = m
+                    .get("stats")
+                    .and_then(|st| st.get("rx_bytes"))
+                    .and_then(|x| match x {
+                        Value::Number(n) => n.as_u64(),
+                        Value::String(s) => s.parse().ok(),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                out.insert(id.clone(), rx);
+            }
+            for child in m.values() {
+                collect_conn_rx(child, out);
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|x| collect_conn_rx(x, out)),
+        _ => {}
+    }
+}
 
 fn start_info_refresher() {
     REFRESHER.call_once(|| {
         CTX.rt.spawn(async {
             let mut tick = tokio::time::interval(Duration::from_millis(1000));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut prev_rx: HashMap<String, u64> = HashMap::new();
             loop {
                 tick.tick().await;
-                let uuid = CURRENT.lock().ok().and_then(|g| *g);
+                let uuid = CURRENT.load().as_ref().map(|u| **u);
                 let Some(uuid) = uuid else {
-                    if let Ok(mut c) = INFO_CACHE.lock() {
-                        *c = None;
-                    }
+                    INFO_CACHE.store(None);
+                    prev_rx.clear();
                     continue;
                 };
                 // Run the snapshot in a child task: a hang is bounded by the
@@ -94,9 +152,8 @@ fn start_info_refresher() {
                     Some(densify_running_info(&s))
                 });
                 if let Ok(Some(s)) = work.await {
-                    if let Ok(mut c) = INFO_CACHE.lock() {
-                        *c = Some(s);
-                    }
+                    accumulate_rx(&s, &mut prev_rx);
+                    INFO_CACHE.store(Some(Arc::new(s)));
                 }
             }
         });
@@ -220,8 +277,8 @@ fn d_feature_flag(v: &mut Value) {
 fn d_node(v: &mut Value) {
     od(v, "hostname", json!(""));
     od(v, "version", json!(""));
-    if let Some(ip6) = CONFIGURED_IPV6.lock().ok().and_then(|g| g.clone()) {
-        od(v, "virtual_ipv6", json!(ip6));
+    if let Some(ip6) = CONFIGURED_IPV6.load_full() {
+        od(v, "virtual_ipv6", json!(ip6.as_str()));
     }
     if let Some(x) = v.get_mut("virtual_ipv4") {
         d_cidr(x);
@@ -342,8 +399,9 @@ fn densify_running_info(src: &str) -> String {
 
 fn current_uuid() -> Result<Uuid, String> {
     CURRENT
-        .lock()
-        .map_err(|e| e.to_string())?
+        .load()
+        .as_ref()
+        .map(|u| **u)
         .ok_or_else(|| "no running instance".to_string())
 }
 
@@ -515,14 +573,12 @@ pub extern "C" fn run_network_instance(
                 .into_owned()
         };
         let cfg = prepare_network_config(&cfg_str)?;
-        if let Ok(mut g) = CONFIGURED_IPV6.lock() {
-            *g = cfg.get_ipv6().map(|inet| inet.to_string());
-        }
+        CONFIGURED_IPV6.store(cfg.get_ipv6().map(|inet| Arc::new(inet.to_string())));
         let uuid = CTX
             .manager
             .run_network_instance(cfg, ConfigFileControl::STATIC_CONFIG)
             .map_err(|e| e.to_string())?;
-        *CURRENT.lock().map_err(|e| e.to_string())? = Some(uuid);
+        CURRENT.store(Some(Arc::new(uuid)));
         start_info_refresher();
         Ok(())
     };
@@ -533,16 +589,10 @@ pub extern "C" fn run_network_instance(
 /// Stop the running network instance.
 #[no_mangle]
 pub extern "C" fn stop_network_instance() -> std::ffi::c_int {
-    let uuid = match CURRENT.lock() {
-        Ok(mut g) => g.take(),
-        Err(_) => return -1,
-    };
-    if let Ok(mut c) = INFO_CACHE.lock() {
-        *c = None;
-    }
-    if let Ok(mut g) = CONFIGURED_IPV6.lock() {
-        *g = None;
-    }
+    let uuid = CURRENT.swap(None).as_ref().map(|u| **u);
+    // INFO_CACHE / CONFIGURED_IPV6 are left to their single producers: the
+    // refresher clears the cache on its next tick, and get_running_info gates
+    // on current_uuid() so a stale snapshot is never served after a stop.
     if let Some(uuid) = uuid {
         let manager = CTX.manager.clone();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -568,8 +618,8 @@ pub extern "C" fn force_reconnect(err_msg: *mut *const std::ffi::c_char) -> std:
             .manager
             .instance(uuid)
             .ok_or_else(|| "instance not found".to_string())?;
-        let closed = CTX.rt.block_on(async {
-            tokio::time::timeout(Duration::from_secs(5), async {
+        CTX.rt.spawn(async move {
+            let closed = tokio::time::timeout(Duration::from_secs(5), async {
                 let mut n = 0usize;
                 for snap in instance.peer_snapshots().await {
                     let mut ids = snap.directly_connected_conns.clone();
@@ -587,9 +637,9 @@ pub extern "C" fn force_reconnect(err_msg: *mut *const std::ffi::c_char) -> std:
                 n
             })
             .await
-            .unwrap_or(0)
+            .unwrap_or(0);
+            tracing::warn!(closed, "force_reconnect: dropped peer conns");
         });
-        tracing::warn!(closed, "force_reconnect: dropped peer conns");
         Ok(())
     };
     ret(err_msg, impl_func())
@@ -686,6 +736,16 @@ pub extern "C" fn register_running_info_callback(
 }
 
 /// # Safety
+/// Lifetime count of overlay bytes received, monotonic across peer-conn churn.
+/// The iOS extension's wake() heal check samples this before/after ~20s to tell
+/// "recovered on its own" from "stalled, needs force_reconnect".
+#[no_mangle]
+pub extern "C" fn overlay_rx_total() -> u64 {
+    start_info_refresher();
+    RX_ACCUM.load(Ordering::Relaxed)
+}
+
+/// # Safety
 /// Get running info as a JSON string.
 #[no_mangle]
 pub extern "C" fn get_running_info(
@@ -698,12 +758,12 @@ pub extern "C" fn get_running_info(
         }
         current_uuid()?;
         start_info_refresher();
-        let info = INFO_CACHE
-            .lock()
-            .map_err(|e| e.to_string())?
-            .clone()
-            .unwrap_or_else(|| densify_running_info("{}"));
-        let cstr = CString::new(info).map_err(|e| e.to_string())?;
+        let guard = INFO_CACHE.load();
+        let cstr = match guard.as_deref() {
+            Some(s) => CString::new(s.as_str()),
+            None => CString::new(densify_running_info("{}")),
+        }
+        .map_err(|e| e.to_string())?;
         unsafe { *json = cstr.into_raw() };
         Ok(())
     };
@@ -722,10 +782,9 @@ pub extern "C" fn get_latest_error_msg(
             return Err("msg is a nullptr".to_string());
         }
         let latest = INFO_CACHE
-            .lock()
-            .ok()
-            .and_then(|c| c.clone())
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .load()
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
             .and_then(|v| v.get("error_msg").and_then(|e| e.as_str().map(str::to_owned)));
         match latest {
             Some(latest) => {
