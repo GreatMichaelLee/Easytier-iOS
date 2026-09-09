@@ -173,6 +173,7 @@ struct NetworkStatus: Codable {
             }
         }
         var virtualIPv4: IPv4CIDR?
+        var virtualIPv6: String?
         var hostname: String
         var version: String
         var ips: IPList?
@@ -183,6 +184,7 @@ struct NetworkStatus: Codable {
 
         enum CodingKeys: String, CodingKey {
             case virtualIPv4 = "virtual_ipv4"
+            case virtualIPv6 = "virtual_ipv6"
             case hostname, version
             case ips
             case stunInfo = "stun_info"

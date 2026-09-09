@@ -326,6 +326,9 @@ struct NodeInfoSheet: View {
                         if let virtualIPv4 = nodeInfo.virtualIPv4 {
                             LabeledContent("virtual_ipv4", value: virtualIPv4.description)
                         }
+                        if let virtualIPv6 = nodeInfo.virtualIPv6, !virtualIPv6.isEmpty {
+                            LabeledContent("virtual_ipv6", value: virtualIPv6)
+                        }
                     }
                 } else {
                     Section {
@@ -362,9 +365,14 @@ struct IPInfoSheet: View {
         NavigationStack {
             Form {
                 if let nodeInfo {
-                    if let virtualIPv4 = nodeInfo.virtualIPv4 {
+                    if nodeInfo.virtualIPv4 != nil || (nodeInfo.virtualIPv6?.isEmpty == false) {
                         Section("general") {
-                            LabeledContent("virtual_ipv4", value: virtualIPv4.description)
+                            if let virtualIPv4 = nodeInfo.virtualIPv4 {
+                                LabeledContent("virtual_ipv4", value: virtualIPv4.description)
+                            }
+                            if let virtualIPv6 = nodeInfo.virtualIPv6, !virtualIPv6.isEmpty {
+                                LabeledContent("virtual_ipv6", value: virtualIPv6)
+                            }
                         }
                     }
                     

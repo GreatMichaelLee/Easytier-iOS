@@ -216,29 +216,41 @@ struct StatusView<Manager: NetworkExtensionManagerProtocol>: View {
                 )
             }
 
-            HStack(spacing: 42) {
-                Button {
-                    showIPInfo = true
-                } label: {
-                    StatItem(
-                        label: "virtual_ipv4",
-                        value: LocalizedStringKey(stringLiteral: status?.myNodeInfo?.virtualIPv4?.description ?? "not_available"),
-                        icon: "network"
-                    )
+            VStack(spacing: 0) {
+                Divider()
+                if let v4 = status?.myNodeInfo?.virtualIPv4?.description {
+                    StatusInfoRow(label: "virtual_ipv4", value: LocalizedStringKey(stringLiteral: v4), icon: "network") { showIPInfo = true }
+                    Divider()
                 }
-                .buttonStyle(.plain)
-                
-                Button {
-                    showStunInfo = true
-                } label: {
-                    StatItem(
-                        label: "nat_type",
-                        value: status?.myNodeInfo?.stunInfo?.udpNATType.description ?? LocalizedStringKey(stringLiteral: "not_available"),
-                        icon: "shield"
-                    )
+                if let v6 = status?.myNodeInfo?.virtualIPv6, !v6.isEmpty {
+                    StatusInfoRow(label: "virtual_ipv6", value: LocalizedStringKey(stringLiteral: v6), icon: "network") { showIPInfo = true }
+                    Divider()
                 }
-                .buttonStyle(.plain)
+                if let nat = status?.myNodeInfo?.stunInfo?.udpNATType {
+                    StatusInfoRow(label: "nat_type", value: nat.description, icon: "shield") { showStunInfo = true }
+                    Divider()
+                }
+                if let p4 = status?.myNodeInfo?.ips?.publicIPv4?.description {
+                    StatusInfoRow(label: "public_ipv4", value: LocalizedStringKey(stringLiteral: p4), icon: "globe") { showIPInfo = true }
+                    Divider()
+                }
+                if let p6 = status?.myNodeInfo?.ips?.publicIPv6?.description {
+                    StatusInfoRow(label: "public_ipv6", value: LocalizedStringKey(stringLiteral: p6), icon: "globe") { showIPInfo = true }
+                    Divider()
+                }
+                if let l4 = status?.myNodeInfo?.ips?.interfaceIPv4s?.first?.description {
+                    StatusInfoRow(label: "local_ipv4", value: LocalizedStringKey(stringLiteral: l4), icon: "wifi") { showIPInfo = true }
+                }
+                if let rx = status?.sum(of: \.rxBytes), rx > 0 {
+                    Divider()
+                    StatusInfoRow(label: "total_rx", value: LocalizedStringKey(stringLiteral: trafficSummary(bytes: rx, packets: status?.sum(of: \.rxPackets) ?? 0)), icon: "arrow.down")
+                }
+                if let tx = status?.sum(of: \.txBytes), tx > 0 {
+                    Divider()
+                    StatusInfoRow(label: "total_tx", value: LocalizedStringKey(stringLiteral: trafficSummary(bytes: tx, packets: status?.sum(of: \.txPackets) ?? 0)), icon: "arrow.up")
+                }
             }
+            .padding(.top, 4)
         }
     }
     
@@ -596,6 +608,50 @@ struct TrafficItem: View {
             self.lastTime = currentTime
             diff = max(Double(newValue - previousValue) / interval, 0)
             $previousValue.wrappedValue = newValue
+        }
+    }
+}
+
+func trafficSummary(bytes: Int, packets: Int) -> String {
+    let b = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .binary)
+    return "\(b) \u{00B7} \(packets.formatted(.number)) pkt"
+}
+
+struct StatusInfoRow: View {
+    let label: LocalizedStringKey
+    let value: LocalizedStringKey
+    let icon: String
+    var action: (() -> Void)? = nil
+
+    private var content: some View {
+        HStack(spacing: 10) {
+            Label(label, systemImage: icon)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .layoutPriority(1)
+            Spacer(minLength: 8)
+            Text(value)
+                .font(.footnote)
+                .fontWeight(.medium)
+                .monospaced()
+                .multilineTextAlignment(.trailing)
+            Image(systemName: "chevron.right")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .opacity(action == nil ? 0 : 1)
+        }
+        .padding(.vertical, 9)
+        .padding(.horizontal, 4)
+        .contentShape(Rectangle())
+    }
+
+    var body: some View {
+        if let action {
+            Button(action: action) { content }
+                .buttonStyle(.plain)
+        } else {
+            content
         }
     }
 }

@@ -42,6 +42,9 @@ static CTX: Lazy<Ctx> = Lazy::new(|| {
 
 static CURRENT: Lazy<Mutex<Option<Uuid>>> = Lazy::new(|| Mutex::new(None));
 
+/// Overlay IPv6 from the running config; MyNodeInfo has no field for it.
+static CONFIGURED_IPV6: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
 /// Last serialized running-info snapshot. Refreshed by a background task on
 /// CTX.rt so the FFI getters never block the caller (startTunnel() calls
 /// get_running_info() synchronously on its settings queue).
@@ -125,26 +128,45 @@ fn nat_name_to_int(name: &str) -> i64 {
     }
 }
 
-/// Coerce a field that is a string (or missing) into an enum int.
+/// Coerce a NAT-type field into a valid `NATType` raw value (0..=9). pbjson
+/// emits the enum name; a stale/unknown value (name or number) becomes 0.
 fn coerce_nat(v: &mut Value, key: &str) {
-    let replacement = match v.get(key) {
-        Some(Value::String(s)) => Some(nat_name_to_int(s)),
-        None => Some(0),
-        _ => None, // already a number
+    let n = match v.get(key) {
+        Some(Value::String(s)) => nat_name_to_int(s),
+        Some(Value::Number(num)) => match num.as_i64() {
+            Some(x) if (0..=9).contains(&x) => x,
+            _ => 0,
+        },
+        None => 0,
+        _ => 0,
     };
-    if let (Some(n), Some(o)) = (replacement, v.as_object_mut()) {
+    if let Some(o) = v.as_object_mut() {
         o.insert(key.to_string(), json!(n));
     }
 }
 
-/// pbjson serializes 64-bit ints as decimal strings; Swift wants numbers.
+/// pbjson serializes 64-bit ints as decimal strings; Swift decodes them as
+/// `Int` (Int64 on every supported device). Fold string / float / missing into
+/// a non-negative i64, clamping an above-i64::MAX counter instead of zeroing.
 fn coerce_u64(v: &mut Value, key: &str) {
-    let replacement = match v.get(key) {
-        Some(Value::String(s)) => s.parse::<i64>().ok().or(Some(0)),
-        None => Some(0),
-        _ => None,
+    let n: i64 = match v.get(key) {
+        Some(Value::String(s)) => s
+            .parse::<u64>()
+            .map(|u| u.min(i64::MAX as u64) as i64)
+            .or_else(|_| s.parse::<i64>())
+            .unwrap_or(0)
+            .max(0),
+        Some(Value::Number(num)) => num
+            .as_u64()
+            .map(|u| u.min(i64::MAX as u64) as i64)
+            .or_else(|| num.as_i64())
+            .or_else(|| num.as_f64().map(|f| f.max(0.0).min(i64::MAX as f64) as i64))
+            .unwrap_or(0)
+            .max(0),
+        None => 0,
+        _ => 0,
     };
-    if let (Some(n), Some(o)) = (replacement, v.as_object_mut()) {
+    if let Some(o) = v.as_object_mut() {
         o.insert(key.to_string(), json!(n));
     }
 }
@@ -173,6 +195,9 @@ fn d_feature_flag(v: &mut Value) {
 fn d_node(v: &mut Value) {
     od(v, "hostname", json!(""));
     od(v, "version", json!(""));
+    if let Some(ip6) = CONFIGURED_IPV6.lock().ok().and_then(|g| g.clone()) {
+        od(v, "virtual_ipv6", json!(ip6));
+    }
     if let Some(x) = v.get_mut("virtual_ipv4") {
         d_cidr(x);
     }
@@ -465,6 +490,9 @@ pub extern "C" fn run_network_instance(
                 .into_owned()
         };
         let cfg = prepare_network_config(&cfg_str)?;
+        if let Ok(mut g) = CONFIGURED_IPV6.lock() {
+            *g = cfg.get_ipv6().map(|inet| inet.to_string());
+        }
         let uuid = CTX
             .manager
             .run_network_instance(cfg, ConfigFileControl::STATIC_CONFIG)
@@ -486,6 +514,9 @@ pub extern "C" fn stop_network_instance() -> std::ffi::c_int {
     };
     if let Ok(mut c) = INFO_CACHE.lock() {
         *c = None;
+    }
+    if let Ok(mut g) = CONFIGURED_IPV6.lock() {
+        *g = None;
     }
     if let Some(uuid) = uuid {
         let manager = CTX.manager.clone();
