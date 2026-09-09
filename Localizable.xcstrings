@@ -6107,6 +6107,22 @@
           }
         }
       }
+    },
+    "connected_duration": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connected for"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已连接"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

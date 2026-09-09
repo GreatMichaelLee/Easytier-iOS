@@ -15,6 +15,7 @@ struct StatusView<Manager: NetworkExtensionManagerProtocol>: View {
     @State var timer = Timer.publish(every: 1.0, on: .main, in: .common)
     @State var timerSubscription: Cancellable?
     @State var status: NetworkStatus?
+    @State var now = Date()
     
     @State var selectedInfoKind: InfoKind = .peerInfo
     @State var selectedPeerRoute: SelectedPeerRoute?
@@ -83,6 +84,7 @@ struct StatusView<Manager: NetworkExtensionManagerProtocol>: View {
                 stopTimer()
                 return
             }
+            now = Date()
             refreshStatus()
         }
         .sheet(item: $selectedPeerRoute) { selection in
@@ -218,6 +220,10 @@ struct StatusView<Manager: NetworkExtensionManagerProtocol>: View {
 
             VStack(spacing: 0) {
                 Divider()
+                if let dur = connectedDurationText {
+                    StatusInfoRow(label: "connected_duration", value: LocalizedStringKey(stringLiteral: dur), icon: "clock")
+                    Divider()
+                }
                 if let v4 = status?.myNodeInfo?.virtualIPv4?.description {
                     StatusInfoRow(label: "virtual_ipv4", value: LocalizedStringKey(stringLiteral: v4), icon: "network") { showIPInfo = true }
                     Divider()
@@ -276,9 +282,20 @@ struct StatusView<Manager: NetworkExtensionManagerProtocol>: View {
         }
     }
 
+    var connectedDurationText: String? {
+        guard let started = manager.connectedDate else { return nil }
+        let secs = Int(max(0, now.timeIntervalSince(started)))
+        let h = secs / 3600, m = (secs % 3600) / 60, sec = secs % 60
+        return h > 0
+            ? String(format: "%d:%02d:%02d", h, m, sec)
+            : String(format: "%d:%02d", m, sec)
+    }
+
     func refreshStatus() {
         manager.fetchRunningInfo { info in
-            status = info
+            DispatchQueue.main.async {
+                status = info
+            }
         }
     }
 
