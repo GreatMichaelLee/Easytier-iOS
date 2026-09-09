@@ -79,108 +79,175 @@ type SharedLogFile = Arc<Mutex<File>>;
 static LOGGER_FILE: Lazy<Arc<Mutex<Option<SharedLogFile>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
 
-/// pbjson drops any field equal to its proto default (empty list, 0, "",
-/// false). The bundled iOS Swift models decode every key as required, so we
-/// re-inflate the shapes they read before returning the snapshot.
-fn obj_default(v: &mut Value, key: &str, default: Value) {
+/// pbjson drops any proto field equal to its default (empty list, 0, "",
+/// false). The bundled iOS Swift models (NetworkStatus / RunningInfo) decode
+/// every key as required, so re-inflate the shapes they read.
+fn od(v: &mut Value, key: &str, default: Value) {
     if let Some(o) = v.as_object_mut() {
         o.entry(key).or_insert(default);
     }
 }
 
-fn densify_stun(v: &mut Value) {
-    obj_default(v, "udp_nat_type", json!(0));
-    obj_default(v, "tcp_nat_type", json!(0));
-    obj_default(v, "last_update_time", json!(0));
-    obj_default(v, "public_ip", json!([]));
+fn d_url(v: &mut Value) {
+    od(v, "url", json!(""));
 }
 
-fn densify_node(v: &mut Value) {
-    obj_default(v, "hostname", json!(""));
-    obj_default(v, "version", json!(""));
-    if let Some(si) = v.get_mut("stun_info") {
-        densify_stun(si);
+fn d_cidr(v: &mut Value) {
+    od(v, "network_length", json!(0));
+    if let Some(a) = v.get_mut("address") {
+        if a.get("part1").is_some()
+            || a.get("part2").is_some()
+            || a.get("part3").is_some()
+            || a.get("part4").is_some()
+        {
+            for k in ["part1", "part2", "part3", "part4"] {
+                od(a, k, json!(0));
+            }
+        } else {
+            od(a, "addr", json!(0));
+        }
     }
 }
 
-fn densify_route(v: &mut Value) {
-    obj_default(v, "peer_id", json!(0));
-    obj_default(v, "next_hop_peer_id", json!(0));
-    obj_default(v, "cost", json!(0));
-    obj_default(v, "path_latency", json!(0));
-    obj_default(v, "proxy_cidrs", json!([]));
-    obj_default(v, "hostname", json!(""));
-    obj_default(v, "inst_id", json!(""));
-    obj_default(v, "version", json!(""));
-    if let Some(si) = v.get_mut("stun_info") {
-        densify_stun(si);
+fn d_stun(v: &mut Value) {
+    od(v, "udp_nat_type", json!(0));
+    od(v, "tcp_nat_type", json!(0));
+    od(v, "last_update_time", json!(0));
+    od(v, "public_ip", json!([]));
+}
+
+fn d_feature_flag(v: &mut Value) {
+    for k in [
+        "is_public_server",
+        "avoid_relay_data",
+        "kcp_input",
+        "no_relay_kcp",
+        "support_conn_list_sync",
+        "quic_input",
+        "no_relay_quic",
+    ] {
+        od(v, k, json!(false));
     }
 }
 
-fn densify_conn(v: &mut Value) {
-    obj_default(v, "conn_id", json!(""));
-    obj_default(v, "my_peer_id", json!(0));
-    obj_default(v, "is_client", json!(false));
-    obj_default(v, "peer_id", json!(0));
-    obj_default(v, "features", json!([]));
-    obj_default(v, "loss_rate", json!(0.0));
+fn d_node(v: &mut Value) {
+    od(v, "hostname", json!(""));
+    od(v, "version", json!(""));
+    if let Some(x) = v.get_mut("virtual_ipv4") {
+        d_cidr(x);
+    }
+    if let Some(x) = v.get_mut("stun_info") {
+        d_stun(x);
+    }
+    if let Some(x) = v.get_mut("ips") {
+        for k in [
+            "interface_ipv4s",
+            "interface_ipv6s",
+            "listeners",
+        ] {
+            od(x, k, json!([]));
+        }
+    }
+}
+
+fn d_route(v: &mut Value) {
+    od(v, "peer_id", json!(0));
+    od(v, "next_hop_peer_id", json!(0));
+    od(v, "cost", json!(0));
+    od(v, "path_latency", json!(0));
+    od(v, "proxy_cidrs", json!([]));
+    od(v, "hostname", json!(""));
+    od(v, "inst_id", json!(""));
+    od(v, "version", json!(""));
+    for k in ["ipv4_addr", "ipv6_addr"] {
+        if let Some(x) = v.get_mut(k) {
+            d_cidr(x);
+        }
+    }
+    if let Some(x) = v.get_mut("stun_info") {
+        d_stun(x);
+    }
+    if let Some(x) = v.get_mut("feature_flag") {
+        d_feature_flag(x);
+    }
+}
+
+fn d_conn(v: &mut Value) {
+    od(v, "conn_id", json!(""));
+    od(v, "my_peer_id", json!(0));
+    od(v, "is_client", json!(false));
+    od(v, "peer_id", json!(0));
+    od(v, "features", json!([]));
+    od(v, "loss_rate", json!(0.0));
+    if let Some(t) = v.get_mut("tunnel") {
+        od(t, "tunnel_type", json!(""));
+        od(t, "local_addr", json!({ "url": "" }));
+        od(t, "remote_addr", json!({ "url": "" }));
+        if let Some(x) = t.get_mut("local_addr") {
+            d_url(x);
+        }
+        if let Some(x) = t.get_mut("remote_addr") {
+            d_url(x);
+        }
+    }
     if let Some(st) = v.get_mut("stats") {
         for k in ["rx_bytes", "tx_bytes", "rx_packets", "tx_packets", "latency_us"] {
-            obj_default(st, k, json!(0));
+            od(st, k, json!(0));
         }
     }
 }
 
-fn densify_peer(v: &mut Value) {
-    obj_default(v, "peer_id", json!(0));
-    obj_default(v, "conns", json!([]));
-    obj_default(v, "directly_connected_conns", json!([]));
+fn d_peer(v: &mut Value) {
+    od(v, "peer_id", json!(0));
+    od(v, "conns", json!([]));
+    od(v, "directly_connected_conns", json!([]));
     if let Some(cs) = v.get_mut("conns").and_then(Value::as_array_mut) {
         for c in cs {
-            densify_conn(c);
+            d_conn(c);
         }
     }
 }
 
-fn densify_running_info(s: &str) -> String {
-    let Ok(mut v) = serde_json::from_str::<Value>(s) else {
-        return s.to_string();
+fn densify_running_info(src: &str) -> String {
+    let Ok(mut v) = serde_json::from_str::<Value>(src) else {
+        return src.to_string();
     };
-    obj_default(&mut v, "dev_name", json!(""));
-    obj_default(&mut v, "events", json!([]));
-    obj_default(&mut v, "routes", json!([]));
-    obj_default(&mut v, "peers", json!([]));
-    obj_default(&mut v, "peer_route_pairs", json!([]));
-    obj_default(&mut v, "running", json!(false));
+    if !v.is_object() {
+        v = json!({});
+    }
+    od(&mut v, "dev_name", json!(""));
+    od(&mut v, "events", json!([]));
+    od(&mut v, "routes", json!([]));
+    od(&mut v, "peers", json!([]));
+    od(&mut v, "peer_route_pairs", json!([]));
+    od(&mut v, "running", json!(false));
     if let Some(n) = v.get_mut("my_node_info") {
-        densify_node(n);
+        d_node(n);
     }
     if let Some(rs) = v.get_mut("routes").and_then(Value::as_array_mut) {
         for r in rs {
-            densify_route(r);
+            d_route(r);
         }
     }
     if let Some(ps) = v.get_mut("peers").and_then(Value::as_array_mut) {
-        for p in ps {
-            densify_peer(p);
+        for pp in ps {
+            d_peer(pp);
         }
     }
     if let Some(prs) = v.get_mut("peer_route_pairs").and_then(Value::as_array_mut) {
         for pr in prs {
-            if let Some(r) = pr.get_mut("route") {
-                densify_route(r);
-            } else {
-                obj_default(pr, "route", json!({}));
-                if let Some(r) = pr.get_mut("route") {
-                    densify_route(r);
-                }
+            if pr.get("route").is_none() {
+                od(pr, "route", json!({}));
             }
-            if let Some(p) = pr.get_mut("peer") {
-                densify_peer(p);
+            if let Some(r) = pr.get_mut("route") {
+                d_route(r);
+            }
+            if let Some(pp) = pr.get_mut("peer") {
+                d_peer(pp);
             }
         }
     }
-    serde_json::to_string(&v).unwrap_or_else(|_| s.to_string())
+    serde_json::to_string(&v).unwrap_or_else(|_| src.to_string())
 }
 
 fn current_uuid() -> Result<Uuid, String> {
@@ -508,7 +575,7 @@ pub extern "C" fn get_running_info(
             .lock()
             .map_err(|e| e.to_string())?
             .clone()
-            .ok_or("running info not ready yet".to_string())?;
+            .unwrap_or_else(|| densify_running_info("{}"));
         let cstr = CString::new(info).map_err(|e| e.to_string())?;
         unsafe { *json = cstr.into_raw() };
         Ok(())
