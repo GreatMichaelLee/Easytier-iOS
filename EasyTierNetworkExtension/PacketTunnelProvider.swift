@@ -501,10 +501,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func wakeHealSample(generation: UInt64) {
-        guard self.activeTunnelGeneration == generation else {
-            self.wakeHealInFlight = false
-            return
-        }
+        // A generation mismatch means the tunnel was stopped/restarted under us;
+        // that path already cleared wakeHealInFlight via resetTunnelSessionState,
+        // and the flag now belongs to the new tunnel's chain -- don't touch it.
+        guard self.activeTunnelGeneration == generation else { return }
         // Monotonic across peer-conn churn: a re-dial (ours or EasyTier's) mints
         // a fresh conn_id with a zeroed counter, but the Rust accumulator keeps
         // climbing, so a plain before/after comparison stays correct.
@@ -515,8 +515,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func wakeHealDecide(generation: UInt64, before: UInt64) {
-        self.wakeHealInFlight = false
         guard self.activeTunnelGeneration == generation else { return }
+        self.wakeHealInFlight = false
         self.reasserting = false
         let after = overlay_rx_total()
         if after > before {
