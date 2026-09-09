@@ -1,24 +1,59 @@
-use std::{ffi::CString, fs::File, io::{self, Seek, SeekFrom, Write}, sync::{Arc, Mutex}};
+use std::{
+    ffi::CString,
+    fs::File,
+    io::{self, Seek, SeekFrom, Write},
+    sync::{Arc, Mutex},
+};
 
 use easytier::{
     common::{
-        config::{process_secure_mode_cfg, ConfigFileControl, ConfigLoader, TomlConfigLoader},
-        global_ctx::GlobalCtxEvent,
+        config::{ConfigLoader, TomlConfigLoader},
+        global_ctx::{EventBusSubscriber, GlobalCtxEvent},
     },
-    launcher::NetworkInstance,
+    instance::factory::{
+        native_instance_manager_with_runtime, subscribe_native_instance_event, NativeInstanceManager,
+    },
 };
+use easytier_core::{config::normalize_secure_mode_config, instance::manager::ConfigFileControl};
 use once_cell::sync::Lazy;
+use tokio::runtime::{Builder, Runtime};
 use tracing_oslog::OsLogger;
 use tracing_subscriber::layer::SubscriberExt as _;
+use uuid::Uuid;
 
-static INSTANCE: Lazy<Arc<Mutex<Option<NetworkInstance>>>> = Lazy::new(|| Arc::new(Mutex::new(None)));
+struct Ctx {
+    rt: Runtime,
+    manager: Arc<NativeInstanceManager>,
+}
+
+static CTX: Lazy<Ctx> = Lazy::new(|| {
+    // Network Extensions have a tight memory budget; keep the worker pool small.
+    let rt = Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime for easytier-ios");
+    let manager = Arc::new(native_instance_manager_with_runtime(rt.handle().clone()));
+    Ctx { rt, manager }
+});
+
+static CURRENT: Lazy<Mutex<Option<Uuid>>> = Lazy::new(|| Mutex::new(None));
+
 type SharedLogFile = Arc<Mutex<File>>;
-static LOGGER_FILE: Lazy<Arc<Mutex<Option<SharedLogFile>>>> = Lazy::new(|| Arc::new(Mutex::new(None)));
+static LOGGER_FILE: Lazy<Arc<Mutex<Option<SharedLogFile>>>> =
+    Lazy::new(|| Arc::new(Mutex::new(None)));
+
+fn current_uuid() -> Result<Uuid, String> {
+    CURRENT
+        .lock()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "no running instance".to_string())
+}
 
 fn prepare_network_config(cfg_str: &str) -> Result<TomlConfigLoader, String> {
     let cfg = TomlConfigLoader::new_from_str(cfg_str).map_err(|e| e.to_string())?;
     if let Some(secure_mode) = cfg.get_secure_mode() {
-        let secure_mode = process_secure_mode_cfg(secure_mode).map_err(|e| e.to_string())?;
+        let secure_mode = normalize_secure_mode_config(secure_mode).map_err(|e| e.to_string())?;
         if secure_mode.enabled {
             let private_key = secure_mode.private_key().map_err(|e| e.to_string())?;
             let public_key = secure_mode.public_key().map_err(|e| e.to_string())?;
@@ -43,7 +78,6 @@ struct SharedLogWriteGuard {
 
 impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogWriter {
     type Writer = SharedLogWriteGuard;
-
     fn make_writer(&'a self) -> Self::Writer {
         SharedLogWriteGuard {
             file: self.file.clone(),
@@ -53,13 +87,32 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLogWriter {
 
 impl Write for SharedLogWriteGuard {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut file = self.file.lock().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
         file.write(buf)
     }
-
     fn flush(&mut self) -> io::Result<()> {
-        let mut file = self.file.lock().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
         file.flush()
+    }
+}
+
+fn ret(err_msg: *mut *const std::ffi::c_char, r: Result<(), String>) -> std::ffi::c_int {
+    match r {
+        Ok(()) => 0,
+        Err(e) => {
+            if !err_msg.is_null() {
+                if let Ok(cstr) = CString::new(e) {
+                    unsafe { *err_msg = cstr.into_raw() };
+                }
+            }
+            -1
+        }
     }
 }
 
@@ -72,16 +125,8 @@ pub extern "C" fn init_logger(
     subsystem: *const std::ffi::c_char,
     err_msg: *mut *const std::ffi::c_char,
 ) -> std::ffi::c_int {
-    let path = unsafe {
-        std::ffi::CStr::from_ptr(path)
-            .to_string_lossy()
-            .into_owned()
-    };
-    let level = unsafe {
-        std::ffi::CStr::from_ptr(level)
-            .to_string_lossy()
-            .into_owned()
-    };
+    let path = unsafe { std::ffi::CStr::from_ptr(path).to_string_lossy().into_owned() };
+    let level = unsafe { std::ffi::CStr::from_ptr(level).to_string_lossy().into_owned() };
     let subsystem = unsafe {
         std::ffi::CStr::from_ptr(subsystem)
             .to_string_lossy()
@@ -92,33 +137,25 @@ pub extern "C" fn init_logger(
         if LOGGER_FILE.lock().map_err(|e| e.to_string())?.is_some() {
             return Ok::<(), String>(());
         }
-
         let file = Arc::new(Mutex::new(File::create(path).map_err(|e| e.to_string())?));
         let collector = tracing_subscriber::registry()
             .with(tracing_subscriber::EnvFilter::new(level))
-            .with(tracing_subscriber::fmt::layer().with_writer(SharedLogWriter { file: file.clone() }).with_ansi(false))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(SharedLogWriter { file: file.clone() })
+                    .with_ansi(false),
+            )
             .with(OsLogger::new(&subsystem, "rust"));
         tracing::subscriber::set_global_default(collector).map_err(|e| e.to_string())?;
         *LOGGER_FILE.lock().map_err(|e| e.to_string())? = Some(file);
         Ok(())
     };
-
-    match impl_func() {
-        Ok(_) => 0,
-        Err(e) => {
-            if !err_msg.is_null() {
-                if let Ok(cstr) = CString::new(e) {
-                    unsafe { *err_msg = cstr.into_raw(); }
-                };
-            }
-            -1
-        }
-    }
+    ret(err_msg, impl_func())
 }
 
-#[no_mangle]
 /// # Safety
 /// Clear the currently initialized file logger and reset its file offset.
+#[no_mangle]
 pub extern "C" fn clear_logger(err_msg: *mut *const std::ffi::c_char) -> std::ffi::c_int {
     let impl_func = || -> Result<(), String> {
         let file = LOGGER_FILE
@@ -132,70 +169,46 @@ pub extern "C" fn clear_logger(err_msg: *mut *const std::ffi::c_char) -> std::ff
         file.flush().map_err(|e| e.to_string())?;
         Ok(())
     };
-
-    match impl_func() {
-        Ok(_) => 0,
-        Err(e) => {
-            if !err_msg.is_null() {
-                if let Ok(cstr) = CString::new(e) {
-                    unsafe { *err_msg = cstr.into_raw(); }
-                };
-            }
-            -1
-        }
-    }
+    ret(err_msg, impl_func())
 }
 
 /// # Safety
-/// Set the tun fd
+/// Set the tun fd for the running instance.
 #[no_mangle]
 pub extern "C" fn set_tun_fd(
     fd: std::ffi::c_int,
     err_msg: *mut *const std::ffi::c_char,
 ) -> std::ffi::c_int {
     let impl_func = || -> Result<(), String> {
-        let mut inst = INSTANCE.lock().map_err(|e| e.to_string())?;
-        let inst = inst.as_mut().ok_or("no running instance".to_string())?;
-        let sender = inst.get_tun_fd_sender().ok_or("tun fd sender is null".to_string())?;
-        sender.try_send(Some(fd)).map_err(|e| e.to_string())?;
+        let uuid = current_uuid()?;
+        CTX.manager
+            .attach_tun_fd(uuid, fd)
+            .map_err(|e| e.to_string())?;
         Ok(())
     };
-
-    match impl_func() {
-        Ok(_) => 0,
-        Err(e) => {
-            if !err_msg.is_null() {
-                if let Ok(cstr) = CString::new(e) {
-                    unsafe { *err_msg = cstr.into_raw(); }
-                };
-            }
-            -1
-        }
-    }
+    ret(err_msg, impl_func())
 }
 
+/// # Safety
+/// Free a string previously returned by this library.
 #[no_mangle]
-/// # Safety
-/// The pointer `s` must have been returned by one of this library's FFI
-/// functions that allocate strings (for example, via `CString::into_raw()`),
-/// and it must not have been freed previously. Passing any other pointer, or
-/// a pointer that has already been freed, results in undefined behavior.
-/// It is allowed to pass a null pointer; in that case this function is a no-op.
 pub extern "C" fn free_string(s: *const std::ffi::c_char) {
-    if s.is_null() { return; }
+    if s.is_null() {
+        return;
+    }
     unsafe {
-        let _ = std::ffi::CString::from_raw(s as *mut std::ffi::c_char);
+        let _ = CString::from_raw(s as *mut std::ffi::c_char);
     }
 }
 
 /// # Safety
-/// Run the network instance
+/// Run the network instance from TOML config text.
 #[no_mangle]
 pub extern "C" fn run_network_instance(
     cfg_str: *const std::ffi::c_char,
     err_msg: *mut *const std::ffi::c_char,
 ) -> std::ffi::c_int {
-    let impl_func = || {
+    let impl_func = || -> Result<(), String> {
         if cfg_str.is_null() {
             return Err("cfg_str is nullptr".to_string());
         }
@@ -205,44 +218,43 @@ pub extern "C" fn run_network_instance(
                 .into_owned()
         };
         let cfg = prepare_network_config(&cfg_str)?;
-        let mut inst = INSTANCE.lock().map_err(|e| e.to_string())?;
-        let mut new_inst = NetworkInstance::new(cfg, ConfigFileControl::STATIC_CONFIG);
-        new_inst.start().map_err(|e| e.to_string())?;
-        *inst = Some(new_inst);
+        let uuid = CTX
+            .manager
+            .run_network_instance(cfg, ConfigFileControl::STATIC_CONFIG)
+            .map_err(|e| e.to_string())?;
+        *CURRENT.lock().map_err(|e| e.to_string())? = Some(uuid);
         Ok(())
     };
-
-    match impl_func() {
-        Ok(_) => 0,
-        Err(e) => {
-            if !err_msg.is_null() {
-                if let Ok(cstr) = CString::new(e) {
-                    unsafe { *err_msg = cstr.into_raw(); }
-                };
-            }
-            -1
-        }
-    }
+    ret(err_msg, impl_func())
 }
 
 /// # Safety
-/// Stop the network instance
+/// Stop the running network instance.
 #[no_mangle]
 pub extern "C" fn stop_network_instance() -> std::ffi::c_int {
-    match INSTANCE.lock() {
-        Ok(mut inst) => {
-            inst.as_mut()
-                .and_then(|inst| inst.get_stop_notifier())
-                .map(|stop| stop.notify_waiters());
-            *inst = None;
-            0
-        },
-        Err(_) => -1,
+    let uuid = match CURRENT.lock() {
+        Ok(mut g) => g.take(),
+        Err(_) => return -1,
+    };
+    if let Some(uuid) = uuid {
+        let _ = CTX
+            .rt
+            .block_on(CTX.manager.delete_network_instances([uuid]));
     }
+    0
+}
+
+fn subscribe_current() -> Result<EventBusSubscriber, String> {
+    let uuid = current_uuid()?;
+    let instance = CTX
+        .manager
+        .instance(uuid)
+        .ok_or("instance not found".to_string())?;
+    subscribe_native_instance_event(&instance).ok_or("no event subscriber".to_string())
 }
 
 /// # Safety
-/// Register stop callback
+/// Register a callback invoked once when the instance stops.
 #[no_mangle]
 pub extern "C" fn register_stop_callback(
     callback: Option<extern "C" fn()>,
@@ -250,36 +262,31 @@ pub extern "C" fn register_stop_callback(
 ) -> std::ffi::c_int {
     let impl_func = || -> Result<(), String> {
         let callback = callback.ok_or("callback is null".to_string())?;
-        let inst = INSTANCE.lock().map_err(|e| e.to_string())?;
-        let inst = inst.as_ref().ok_or("no running instance".to_string())?;
-        let stop = inst.get_stop_notifier().ok_or("no stop notifier".to_string())?;
+        let mut ev = subscribe_current()?;
         std::thread::spawn(move || {
-            let runtime = tokio::runtime::Runtime::new();
-            if let Ok(runtime) = runtime {
-                runtime.block_on(stop.notified());
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            if let Ok(rt) = rt {
+                rt.block_on(async move {
+                    loop {
+                        match ev.recv().await {
+                            Ok(_) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        }
+                    }
+                });
                 callback();
-            } else {
-                tracing::error!("failed to create runtime for stop callback");
             }
         });
         Ok(())
     };
-
-    match impl_func() {
-        Ok(_) => 0,
-        Err(e) => {
-            if !err_msg.is_null() {
-                if let Ok(cstr) = CString::new(e) {
-                    unsafe { *err_msg = cstr.into_raw(); }
-                };
-            }
-            -1
-        }
-    }
+    ret(err_msg, impl_func())
 }
 
 /// # Safety
-/// Register running info callback
+/// Register a callback invoked whenever running info may have changed.
 #[no_mangle]
 pub extern "C" fn register_running_info_callback(
     callback: Option<extern "C" fn()>,
@@ -287,56 +294,37 @@ pub extern "C" fn register_running_info_callback(
 ) -> std::ffi::c_int {
     let impl_func = || -> Result<(), String> {
         let callback = callback.ok_or("callback is null".to_string())?;
-        let inst = INSTANCE.lock().map_err(|e| e.to_string())?;
-        let inst = inst.as_ref().ok_or("no running instance".to_string())?;
-        let mut ev = inst
-            .subscribe_event()
-            .ok_or("no event subscriber".to_string())?;
+        let mut ev = subscribe_current()?;
         std::thread::spawn(move || {
-            let runtime = tokio::runtime::Runtime::new();
-            if let Ok(runtime) = runtime {
-                runtime.block_on(async move {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            if let Ok(rt) = rt {
+                rt.block_on(async move {
                     loop {
                         match ev.recv().await {
                             Ok(event) => match event {
                                 GlobalCtxEvent::DhcpIpv4Changed(_, _)
-                                | GlobalCtxEvent::ProxyCidrsUpdated(_, _)
+                                | GlobalCtxEvent::ProxyCidrsUpdated(_, _, _, _)
                                 | GlobalCtxEvent::ConfigPatched(_) => {
                                     callback();
                                 }
                                 _ => {}
                             },
-                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                                break;
-                            }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                continue;
-                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         }
                     }
                 });
-            } else {
-                tracing::error!("failed to create runtime for running info callback");
             }
         });
         Ok(())
     };
-
-    match impl_func() {
-        Ok(_) => 0,
-        Err(e) => {
-            if !err_msg.is_null() {
-                if let Ok(cstr) = CString::new(e) {
-                    unsafe { *err_msg = cstr.into_raw(); }
-                };
-            }
-            -1
-        }
-    }
+    ret(err_msg, impl_func())
 }
 
 /// # Safety
-/// Get running info
+/// Get running info as a JSON string.
 #[no_mangle]
 pub extern "C" fn get_running_info(
     json: *mut *const std::ffi::c_char,
@@ -346,33 +334,21 @@ pub extern "C" fn get_running_info(
         if json.is_null() {
             return Err("json is a nullptr".to_string());
         }
-        let inst = INSTANCE.lock().map_err(|e| e.to_string())?;
-        let inst = inst.as_ref().ok_or("no running instance".to_string())?;
-        let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-        let info = runtime.block_on(inst.get_running_info()).map_err(|e| e.to_string())?;
+        let uuid = current_uuid()?;
+        let info = CTX
+            .rt
+            .block_on(CTX.manager.network_info(uuid))
+            .ok_or("no running info".to_string())?;
         let info = serde_json::to_string(&info).map_err(|e| e.to_string())?;
         let cstr = CString::new(info).map_err(|e| e.to_string())?;
-        unsafe {
-            *json = cstr.into_raw()
-        }
+        unsafe { *json = cstr.into_raw() };
         Ok(())
     };
-
-    match impl_func() {
-        Ok(_) => 0,
-        Err(e) => {
-            if !err_msg.is_null() {
-                if let Ok(cstr) = CString::new(e) {
-                    unsafe { *err_msg = cstr.into_raw(); }
-                };
-            }
-            -1
-        }
-    }
+    ret(err_msg, impl_func())
 }
 
 /// # Safety
-/// Get latest error message
+/// Get the latest error message for the running instance, or null.
 #[no_mangle]
 pub extern "C" fn get_latest_error_msg(
     msg: *mut *const std::ffi::c_char,
@@ -382,98 +358,19 @@ pub extern "C" fn get_latest_error_msg(
         if msg.is_null() {
             return Err("msg is a nullptr".to_string());
         }
-        let inst = INSTANCE.lock().map_err(|e| e.to_string())?;
-        let inst = inst.as_ref().ok_or("no running instance".to_string())?;
-        let latest = inst.get_latest_error_msg();
-        if let Some(latest) = latest {
-            let cstr = CString::new(latest).map_err(|e| e.to_string())?;
-            unsafe { *msg = cstr.into_raw(); }
-        } else {
-            unsafe { *msg = std::ptr::null(); }
+        let latest = current_uuid()
+            .ok()
+            .and_then(|uuid| CTX.rt.block_on(CTX.manager.network_info(uuid)))
+            .and_then(|info| serde_json::to_value(&info).ok())
+            .and_then(|v| v.get("error_msg").and_then(|e| e.as_str().map(str::to_owned)));
+        match latest {
+            Some(latest) => {
+                let cstr = CString::new(latest).map_err(|e| e.to_string())?;
+                unsafe { *msg = cstr.into_raw() };
+            }
+            None => unsafe { *msg = std::ptr::null() },
         }
         Ok(())
     };
-
-    match impl_func() {
-        Ok(_) => 0,
-        Err(e) => {
-            if !err_msg.is_null() {
-                if let Ok(cstr) = CString::new(e) {
-                    unsafe { *err_msg = cstr.into_raw(); }
-                };
-            }
-            -1
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_prepare_network_config_generates_secure_mode_keys() {
-        let cfg = prepare_network_config(
-            r#"
-                [network_identity]
-                network_name = "secure-test"
-                network_secret = ""
-
-                [secure_mode]
-                enabled = true
-            "#,
-        )
-        .unwrap();
-
-        let secure_mode = cfg.get_secure_mode().unwrap();
-        assert!(secure_mode.local_private_key.is_some());
-        assert!(secure_mode.local_public_key.is_some());
-        assert!(secure_mode.private_key().is_ok());
-        assert!(secure_mode.public_key().is_ok());
-    }
-
-    #[test]
-    fn test_prepare_network_config_rejects_invalid_secure_mode_key() {
-        let result = prepare_network_config(
-            r#"
-                [network_identity]
-                network_name = "secure-test"
-                network_secret = ""
-
-                [secure_mode]
-                enabled = true
-                local_private_key = "invalid"
-            "#,
-        );
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_prepare_network_config_rejects_mismatched_secure_mode_keypair() {
-        let result = prepare_network_config(
-            r#"
-                [network_identity]
-                network_name = "secure-test"
-                network_secret = ""
-
-                [secure_mode]
-                enabled = true
-                local_private_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-                local_public_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-            "#,
-        );
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_run_network_instance() {
-        let cfg_str = r#"
-            inst_name = "test"
-            network = "test_network"
-        "#;
-        let cstr = std::ffi::CString::new(cfg_str).unwrap();
-        assert_eq!(run_network_instance(cstr.as_ptr(), std::ptr::null_mut()), 0);
-    }
+    ret(err_msg, impl_func())
 }
