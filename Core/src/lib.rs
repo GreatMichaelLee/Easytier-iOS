@@ -2,7 +2,8 @@ use std::{
     ffi::CString,
     fs::File,
     io::{self, Seek, SeekFrom, Write},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Once},
+    time::Duration,
 };
 
 use easytier::{
@@ -27,9 +28,10 @@ struct Ctx {
 }
 
 static CTX: Lazy<Ctx> = Lazy::new(|| {
-    // Network Extensions have a tight memory budget; keep the worker pool small.
+    // Network Extensions have a tight memory budget, but 2 workers let the
+    // core saturate them and starve any block_on() from the FFI thread.
     let rt = Builder::new_multi_thread()
-        .worker_threads(2)
+        .worker_threads(4)
         .enable_all()
         .build()
         .expect("tokio runtime for easytier-ios");
@@ -38,6 +40,38 @@ static CTX: Lazy<Ctx> = Lazy::new(|| {
 });
 
 static CURRENT: Lazy<Mutex<Option<Uuid>>> = Lazy::new(|| Mutex::new(None));
+
+/// Last serialized running-info snapshot. Refreshed by a background task on
+/// CTX.rt so the FFI getters never block the caller (startTunnel() calls
+/// get_running_info() synchronously on its settings queue).
+static INFO_CACHE: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+static REFRESHER: Once = Once::new();
+
+fn start_info_refresher() {
+    REFRESHER.call_once(|| {
+        CTX.rt.spawn(async {
+            let mut tick = tokio::time::interval(Duration::from_millis(1000));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                let uuid = CURRENT.lock().ok().and_then(|g| *g);
+                let Some(uuid) = uuid else {
+                    if let Ok(mut c) = INFO_CACHE.lock() {
+                        *c = None;
+                    }
+                    continue;
+                };
+                if let Some(info) = CTX.manager.network_info(uuid).await {
+                    if let Ok(s) = serde_json::to_string(&info) {
+                        if let Ok(mut c) = INFO_CACHE.lock() {
+                            *c = Some(s);
+                        }
+                    }
+                }
+            }
+        });
+    });
+}
 
 type SharedLogFile = Arc<Mutex<File>>;
 static LOGGER_FILE: Lazy<Arc<Mutex<Option<SharedLogFile>>>> =
@@ -223,6 +257,7 @@ pub extern "C" fn run_network_instance(
             .run_network_instance(cfg, ConfigFileControl::STATIC_CONFIG)
             .map_err(|e| e.to_string())?;
         *CURRENT.lock().map_err(|e| e.to_string())? = Some(uuid);
+        start_info_refresher();
         Ok(())
     };
     ret(err_msg, impl_func())
@@ -236,10 +271,19 @@ pub extern "C" fn stop_network_instance() -> std::ffi::c_int {
         Ok(mut g) => g.take(),
         Err(_) => return -1,
     };
+    if let Ok(mut c) = INFO_CACHE.lock() {
+        *c = None;
+    }
     if let Some(uuid) = uuid {
-        let _ = CTX
-            .rt
-            .block_on(CTX.manager.delete_network_instances([uuid]));
+        let manager = CTX.manager.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        CTX.rt.spawn(async move {
+            let _ = manager.delete_network_instances([uuid]).await;
+            let _ = tx.send(());
+        });
+        // Don't let a wedged runtime hang stopTunnel(); the task above still
+        // runs to completion in the background if this times out.
+        let _ = rx.recv_timeout(Duration::from_secs(3));
     }
     0
 }
@@ -334,12 +378,13 @@ pub extern "C" fn get_running_info(
         if json.is_null() {
             return Err("json is a nullptr".to_string());
         }
-        let uuid = current_uuid()?;
-        let info = CTX
-            .rt
-            .block_on(CTX.manager.network_info(uuid))
-            .ok_or("no running info".to_string())?;
-        let info = serde_json::to_string(&info).map_err(|e| e.to_string())?;
+        current_uuid()?;
+        start_info_refresher();
+        let info = INFO_CACHE
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone()
+            .ok_or("running info not ready yet".to_string())?;
         let cstr = CString::new(info).map_err(|e| e.to_string())?;
         unsafe { *json = cstr.into_raw() };
         Ok(())
@@ -358,10 +403,11 @@ pub extern "C" fn get_latest_error_msg(
         if msg.is_null() {
             return Err("msg is a nullptr".to_string());
         }
-        let latest = current_uuid()
+        let latest = INFO_CACHE
+            .lock()
             .ok()
-            .and_then(|uuid| CTX.rt.block_on(CTX.manager.network_info(uuid)))
-            .and_then(|info| serde_json::to_value(&info).ok())
+            .and_then(|c| c.clone())
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
             .and_then(|v| v.get("error_msg").and_then(|e| e.as_str().map(str::to_owned)));
         match latest {
             Some(latest) => {
