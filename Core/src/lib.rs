@@ -449,24 +449,42 @@ pub extern "C" fn register_running_info_callback(
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build();
-            if let Ok(rt) = rt {
-                rt.block_on(async move {
-                    loop {
-                        match ev.recv().await {
+            let Ok(rt) = rt else { return };
+            rt.block_on(async move {
+                let start = tokio::time::Instant::now();
+                let mut tick = tokio::time::interval(Duration::from_secs(3));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tokio::select! {
+                        _ = tick.tick() => {
+                            // Routes/proxy-cidrs can settle with no GlobalCtxEvent,
+                            // and just after PeerAdded the route entry has no
+                            // proxy_cidrs yet. Nudge the NE while things settle.
+                            if start.elapsed() < Duration::from_secs(60) {
+                                callback();
+                            }
+                        }
+                        recv = ev.recv() => match recv {
                             Ok(event) => match event {
                                 GlobalCtxEvent::DhcpIpv4Changed(_, _)
+                                | GlobalCtxEvent::DhcpIpv4Conflicted(_)
                                 | GlobalCtxEvent::ProxyCidrsUpdated(_, _, _, _)
+                                | GlobalCtxEvent::PublicIpv6Changed(_, _)
+                                | GlobalCtxEvent::PublicIpv6RoutesUpdated(_, _)
+                                | GlobalCtxEvent::PeerAdded(_)
+                                | GlobalCtxEvent::PeerRemoved(_)
+                                | GlobalCtxEvent::TunDeviceReady(_)
                                 | GlobalCtxEvent::ConfigPatched(_) => {
                                     callback();
                                 }
                                 _ => {}
                             },
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                        }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        },
                     }
-                });
-            }
+                }
+            });
         });
         Ok(())
     };
