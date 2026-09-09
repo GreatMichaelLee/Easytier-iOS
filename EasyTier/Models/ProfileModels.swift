@@ -103,6 +103,7 @@ nonisolated struct NetworkProfile: Identifiable, Equatable {
     var networkName: String = "easytier"
     var dhcp: Bool = true
     var virtualIPv4: CIDR = CIDR(ip: "10.126.126.1", length: "24")
+    var virtualIPv6: String = ""
     var hostname: String = ""
     var networkSecret: String = ""
 
@@ -149,6 +150,7 @@ nonisolated struct NetworkProfile: Identifiable, Equatable {
 
     var enableManualRoutes: Bool = false
     var routes: [CIDR] = []
+    var routesV6: [TextItem] = []
     
     var portForwards: [PortForwardSetting] = []
 
@@ -202,6 +204,10 @@ nonisolated struct NetworkProfile: Identifiable, Equatable {
             let parsed = NetworkConfig.splitCIDR(ipv4, defaultLength: profile.virtualIPv4.length)
             profile.virtualIPv4 = .init(ip: parsed.ip, length: parsed.length)
             profile.dhcp = false
+        }
+
+        if let ipv6 = config.ipv6, !ipv6.isEmpty {
+            profile.virtualIPv6 = ipv6
         }
 
         if let peer = config.peer, !peer.isEmpty {
@@ -272,6 +278,11 @@ nonisolated struct NetworkProfile: Identifiable, Equatable {
                 let parsed = NetworkConfig.splitCIDR(item, defaultLength: "32")
                 return .init(ip: parsed.ip, length: parsed.length)
             }
+        }
+
+        if let routesV6 = config.routesV6, !routesV6.isEmpty {
+            profile.enableManualRoutes = true
+            profile.routesV6 = routesV6.map { .init($0) }
         }
 
         if let overrideDNS = config.overrideDNS {

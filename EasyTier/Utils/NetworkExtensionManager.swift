@@ -201,8 +201,15 @@ class NetworkExtensionManager: NetworkExtensionManagerProtocol {
         } else {
             options.mtu = config.flags?.enableEncryption ?? true ? 1360 : 1380
         }
+        var allRoutes: [String] = []
         if let routes = config.routes {
-            options.routes = routes
+            allRoutes.append(contentsOf: routes)
+        }
+        if let routesV6 = config.routesV6 {
+            allRoutes.append(contentsOf: routesV6)
+        }
+        if !allRoutes.isEmpty {
+            options.routes = allRoutes
         }
         if let logLevel = UserDefaults.standard.string(forKey: "logLevel"),
            let logLevel = LogLevel.init(rawValue: logLevel) {

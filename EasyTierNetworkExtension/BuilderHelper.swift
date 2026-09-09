@@ -1,4 +1,5 @@
 import NetworkExtension
+import Network
 import os
 
 import EasyTierShared
@@ -37,14 +38,17 @@ func buildSettings(_ options: EasyTierOptions) -> NEPacketTunnelNetworkSettings 
         settings.ipv4Settings = ipv4Settings
     }
 
-    if let ipv6CIDR = options.ipv6?.split(separator: "/"), ipv6CIDR.count == 2 {
-        let ip = ipv6CIDR[0], cidrStr = ipv6CIDR[1]
-        if let cidr = Int(cidrStr) {
-            settings.ipv6Settings = .init(
-                addresses: [String(ip)],
-                networkPrefixLengths: [NSNumber(value: cidr)]
-            )
+    if let ipv6 = options.ipv6, let (v6addr, v6prefix) = splitIPv6CIDR(ipv6) {
+        let ipv6Settings = NEIPv6Settings(
+            addresses: [v6addr],
+            networkPrefixLengths: [NSNumber(value: v6prefix)]
+        )
+        let v6routes = buildIPv6Routes(info: runningInfo, options: options)
+        if !v6routes.isEmpty {
+            logger.info("prepareSettings() ipv6 routes: \(v6routes.count)")
+            ipv6Settings.includedRoutes = v6routes
         }
+        settings.ipv6Settings = ipv6Settings
     }
 
     if let dns = buildDNSServers(options: options) {
@@ -114,12 +118,50 @@ func buildIPv4Routes(info: RunningInfo?, options: EasyTierOptions) -> [NEIPv4Rou
         sortedCIDRs.remove(at: index)
     }
     return sortedCIDRs.compactMap { cidr in
+        if cidr.networkLength == 0 {
+            return NEIPv4Route.default()
+        }
         guard let mask = cidrToSubnetMask(cidr.networkLength) else {
             logger.warning("buildIPv4Routes() invalid cidr length: \(cidr.networkLength, privacy: .public)")
             return nil
         }
         return NEIPv4Route(destinationAddress: cidr.address.description, subnetMask: mask)
     }
+}
+
+func splitIPv6CIDR(_ s: String) -> (String, Int)? {
+    let parts = s.split(separator: "/")
+    guard parts.count == 2,
+          let prefix = Int(parts[1]), (0...128).contains(prefix),
+          IPv6Address(String(parts[0])) != nil
+    else { return nil }
+    return (String(parts[0]), prefix)
+}
+
+func buildIPv6Routes(info: RunningInfo?, options: EasyTierOptions) -> [NEIPv6Route] {
+    var seen = Set<String>()
+    var routes: [NEIPv6Route] = []
+    func add(_ addr: String, _ prefix: Int) {
+        let key = "\(addr)/\(prefix)"
+        guard !seen.contains(key) else { return }
+        seen.insert(key)
+        if prefix == 0 {
+            routes.append(NEIPv6Route.default())
+        } else {
+            routes.append(NEIPv6Route(destinationAddress: addr, networkPrefixLength: NSNumber(value: prefix)))
+        }
+    }
+    for route in options.routes {
+        if let (a, p) = splitIPv6CIDR(route) { add(a, p) }
+    }
+    if let infoRoutes = info?.routes {
+        for route in infoRoutes {
+            for cidr in route.proxyCIDRs {
+                if let (a, p) = splitIPv6CIDR(cidr) { add(a, p) }
+            }
+        }
+    }
+    return routes
 }
 
 func buildDNSServers(options: EasyTierOptions) -> NEDNSSettings? {

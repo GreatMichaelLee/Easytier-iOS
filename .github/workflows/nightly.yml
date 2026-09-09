@@ -17,7 +17,7 @@ env:
   SCHEME: EasyTier
   BUILD_CONFIGURATION: Release
   IPA_NAME: EasyTier-nightly-trollstore.ipa
-  TEAM_ID: M2G6355ZK7
+  TEAM_ID: Z78N6GQ84P
 
 jobs:
   build-and-release:
@@ -113,7 +113,7 @@ jobs:
                 -c "Print :CFBundleIdentifier" \
                 "${bundle_path}/Info.plist"
             )"
-            application_identifier="${TEAM_ID}.${bundle_identifier}"
+            application_identifier="${TEAM_ID}.app.turquoise1634.pearl6659"
 
             cp "${source_path}" "${output_path}"
             /usr/libexec/PlistBuddy \

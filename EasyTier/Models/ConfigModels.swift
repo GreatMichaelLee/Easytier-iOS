@@ -197,6 +197,8 @@ nonisolated struct NetworkConfig: Codable {
     
     /// Mapped from Rust `Vec<cidr::Ipv4Cidr>`
     var routes: [String]?
+    /// Mapped from Rust `Vec<cidr::Ipv6Cidr>`
+    var routesV6: [String]?
     var overrideDNS: [String]?
     
     var socks5Proxy: String?
@@ -236,6 +238,7 @@ nonisolated struct NetworkConfig: Codable {
         case proxyNetwork = "proxy_network"
         case vpnPortalConfig = "vpn_portal_config"
         case routes
+        case routesV6 = "routes_v6"
         case overrideDNS = "override_dns"
         case socks5Proxy = "socks5_proxy"
         case portForward = "port_forward"
@@ -282,6 +285,8 @@ nonisolated struct NetworkConfig: Codable {
         } else {
             self.ipv4 = nil
         }
+
+        self.ipv6 = profile.virtualIPv6.isEmpty ? nil : profile.virtualIPv6
         
         self.peer = emptyAsNil(profile.peerConfigs.compactMap { item in
             guard !item.uri.isEmpty else { return nil }
@@ -336,8 +341,10 @@ nonisolated struct NetworkConfig: Codable {
         
         if profile.enableManualRoutes {
             self.routes = profile.routes.map { $0.cidrString }
+            self.routesV6 = emptyAsNil(profile.routesV6.compactMap { $0.text.isEmpty ? nil : $0.text })
         } else {
             self.routes = nil
+            self.routesV6 = nil
         }
         
         if profile.enableOverrideDNS {

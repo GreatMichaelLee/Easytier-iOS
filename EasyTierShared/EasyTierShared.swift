@@ -1,8 +1,8 @@
 @preconcurrency import NetworkExtension
 import os
 
-public let APP_BUNDLE_ID: String = "cn.easytier"
-public let APP_GROUP_ID: String = "group.cn.easytier"
+public let APP_BUNDLE_ID: String = "app.turquoise1634.pearl6659"
+public let APP_GROUP_ID: String = "group.fd9ff23136f2b311.1"
 public let ICLOUD_CONTAINER_ID: String = "iCloud.cn.easytier"
 public let LOG_FILENAME: String = "easytier.log"
 

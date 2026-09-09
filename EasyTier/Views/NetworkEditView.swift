@@ -92,6 +92,18 @@ struct NetworkEditView: View {
                 }
             }
 
+            Section("virtual_ipv6") {
+                LabeledContent("address") {
+                    TextField("fd00::/64", text: $profile.virtualIPv6)
+                        .labelsHidden()
+                        .multilineTextAlignment(.trailing)
+                        .autocorrectionDisabled()
+#if !os(macOS)
+                        .textInputAutocapitalization(.never)
+#endif
+                }
+            }
+
             Section("network") {
                 LabeledContent("network_name") {
                     TextField(
@@ -464,6 +476,19 @@ struct NetworkEditView: View {
                                 .foregroundStyle(.secondary)
                             Spacer()
                             IPv4Field(ip: cidr.ip, length: cidr.length)
+                        }
+                    })
+                    ListEditor(newItemTitle: "common_text.add_route", items: $profile.routesV6, addItemFactory: { "" }, rowContent: { route in
+                        HStack {
+                            Text("cidr")
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            TextField("::/0", text: route.text)
+                                .multilineTextAlignment(.trailing)
+                                .autocorrectionDisabled()
+#if !os(macOS)
+                                .textInputAutocapitalization(.never)
+#endif
                         }
                     })
                 }

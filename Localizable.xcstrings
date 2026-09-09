@@ -5886,6 +5886,22 @@
         }
       }
     },
+    "virtual_ipv6" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Virtual IPv6"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "虚拟 IPv6 地址"
+          }
+        }
+      }
+    },
     "vpn_connect" : {
       "localizations" : {
         "en" : {
