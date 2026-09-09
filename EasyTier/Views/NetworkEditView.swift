@@ -478,9 +478,9 @@ struct NetworkEditView: View {
                             IPv4Field(ip: cidr.ip, length: cidr.length)
                         }
                     })
-                    ListEditor(newItemTitle: "common_text.add_route", items: $profile.routesV6, addItemFactory: { "" }, rowContent: { route in
+                    ListEditor(newItemTitle: "common_text.add_route_v6", items: $profile.routesV6, addItemFactory: { "" }, rowContent: { route in
                         HStack {
-                            Text("cidr")
+                            Text("cidr_v6")
                                 .foregroundStyle(.secondary)
                             Spacer()
                             TextField("::/0", text: route.text)
