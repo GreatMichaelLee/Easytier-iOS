@@ -109,10 +109,50 @@ fn d_cidr(v: &mut Value) {
     }
 }
 
+/// pbjson serializes proto enums as their name; the Swift NATType is `Int`.
+fn nat_name_to_int(name: &str) -> i64 {
+    match name {
+        "OpenInternet" => 1,
+        "NoPAT" => 2,
+        "FullCone" => 3,
+        "Restricted" => 4,
+        "PortRestricted" => 5,
+        "Symmetric" => 6,
+        "SymUdpFirewall" => 7,
+        "SymmetricEasyInc" => 8,
+        "SymmetricEasyDec" => 9,
+        _ => 0, // "Unknown" or anything unexpected
+    }
+}
+
+/// Coerce a field that is a string (or missing) into an enum int.
+fn coerce_nat(v: &mut Value, key: &str) {
+    let replacement = match v.get(key) {
+        Some(Value::String(s)) => Some(nat_name_to_int(s)),
+        None => Some(0),
+        _ => None, // already a number
+    };
+    if let (Some(n), Some(o)) = (replacement, v.as_object_mut()) {
+        o.insert(key.to_string(), json!(n));
+    }
+}
+
+/// pbjson serializes 64-bit ints as decimal strings; Swift wants numbers.
+fn coerce_u64(v: &mut Value, key: &str) {
+    let replacement = match v.get(key) {
+        Some(Value::String(s)) => s.parse::<i64>().ok().or(Some(0)),
+        None => Some(0),
+        _ => None,
+    };
+    if let (Some(n), Some(o)) = (replacement, v.as_object_mut()) {
+        o.insert(key.to_string(), json!(n));
+    }
+}
+
 fn d_stun(v: &mut Value) {
-    od(v, "udp_nat_type", json!(0));
-    od(v, "tcp_nat_type", json!(0));
-    od(v, "last_update_time", json!(0));
+    coerce_nat(v, "udp_nat_type");
+    coerce_nat(v, "tcp_nat_type");
+    coerce_u64(v, "last_update_time");
     od(v, "public_ip", json!([]));
 }
 
@@ -192,7 +232,7 @@ fn d_conn(v: &mut Value) {
     }
     if let Some(st) = v.get_mut("stats") {
         for k in ["rx_bytes", "tx_bytes", "rx_packets", "tx_packets", "latency_us"] {
-            od(st, k, json!(0));
+            coerce_u64(st, k);
         }
     }
 }
