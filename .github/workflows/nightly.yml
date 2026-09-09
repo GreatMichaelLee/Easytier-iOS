@@ -29,6 +29,28 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Set up private core repo access (cargo -> GreatMichaelLee/Easytier)
+        env:
+          CORE_SSH_KEY: ${{ secrets.CORE_SSH_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          install -m 600 /dev/null ~/.ssh/core_ci_key
+          printf '%s\n' "$CORE_SSH_KEY" > ~/.ssh/core_ci_key
+          ssh-keyscan -t ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          cat >> ~/.ssh/config <<'EOF'
+          Host github.com-easytier-core
+            HostName github.com
+            User git
+            IdentityFile ~/.ssh/core_ci_key
+            IdentitiesOnly yes
+          EOF
+          git config --global \
+            url."git@github.com-easytier-core:GreatMichaelLee/Easytier.git".insteadOf \
+            "https://github.com/GreatMichaelLee/Easytier.git"
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
+
       - name: Select Xcode and install build dependencies
         shell: bash
         run: |
