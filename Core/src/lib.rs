@@ -17,6 +17,7 @@ use easytier::{
 };
 use easytier_core::{config::normalize_secure_mode_config, instance::manager::ConfigFileControl};
 use once_cell::sync::Lazy;
+use serde_json::{json, Value};
 use tokio::runtime::{Builder, Runtime};
 use tracing_oslog::OsLogger;
 use tracing_subscriber::layer::SubscriberExt as _;
@@ -63,6 +64,7 @@ fn start_info_refresher() {
                 };
                 if let Some(info) = CTX.manager.network_info(uuid).await {
                     if let Ok(s) = serde_json::to_string(&info) {
+                        let s = densify_running_info(&s);
                         if let Ok(mut c) = INFO_CACHE.lock() {
                             *c = Some(s);
                         }
@@ -76,6 +78,110 @@ fn start_info_refresher() {
 type SharedLogFile = Arc<Mutex<File>>;
 static LOGGER_FILE: Lazy<Arc<Mutex<Option<SharedLogFile>>>> =
     Lazy::new(|| Arc::new(Mutex::new(None)));
+
+/// pbjson drops any field equal to its proto default (empty list, 0, "",
+/// false). The bundled iOS Swift models decode every key as required, so we
+/// re-inflate the shapes they read before returning the snapshot.
+fn obj_default(v: &mut Value, key: &str, default: Value) {
+    if let Some(o) = v.as_object_mut() {
+        o.entry(key).or_insert(default);
+    }
+}
+
+fn densify_stun(v: &mut Value) {
+    obj_default(v, "udp_nat_type", json!(0));
+    obj_default(v, "tcp_nat_type", json!(0));
+    obj_default(v, "last_update_time", json!(0));
+    obj_default(v, "public_ip", json!([]));
+}
+
+fn densify_node(v: &mut Value) {
+    obj_default(v, "hostname", json!(""));
+    obj_default(v, "version", json!(""));
+    if let Some(si) = v.get_mut("stun_info") {
+        densify_stun(si);
+    }
+}
+
+fn densify_route(v: &mut Value) {
+    obj_default(v, "peer_id", json!(0));
+    obj_default(v, "next_hop_peer_id", json!(0));
+    obj_default(v, "cost", json!(0));
+    obj_default(v, "path_latency", json!(0));
+    obj_default(v, "proxy_cidrs", json!([]));
+    obj_default(v, "hostname", json!(""));
+    obj_default(v, "inst_id", json!(""));
+    obj_default(v, "version", json!(""));
+    if let Some(si) = v.get_mut("stun_info") {
+        densify_stun(si);
+    }
+}
+
+fn densify_conn(v: &mut Value) {
+    obj_default(v, "conn_id", json!(""));
+    obj_default(v, "my_peer_id", json!(0));
+    obj_default(v, "is_client", json!(false));
+    obj_default(v, "peer_id", json!(0));
+    obj_default(v, "features", json!([]));
+    obj_default(v, "loss_rate", json!(0.0));
+    if let Some(st) = v.get_mut("stats") {
+        for k in ["rx_bytes", "tx_bytes", "rx_packets", "tx_packets", "latency_us"] {
+            obj_default(st, k, json!(0));
+        }
+    }
+}
+
+fn densify_peer(v: &mut Value) {
+    obj_default(v, "peer_id", json!(0));
+    obj_default(v, "conns", json!([]));
+    obj_default(v, "directly_connected_conns", json!([]));
+    if let Some(cs) = v.get_mut("conns").and_then(Value::as_array_mut) {
+        for c in cs {
+            densify_conn(c);
+        }
+    }
+}
+
+fn densify_running_info(s: &str) -> String {
+    let Ok(mut v) = serde_json::from_str::<Value>(s) else {
+        return s.to_string();
+    };
+    obj_default(&mut v, "dev_name", json!(""));
+    obj_default(&mut v, "events", json!([]));
+    obj_default(&mut v, "routes", json!([]));
+    obj_default(&mut v, "peers", json!([]));
+    obj_default(&mut v, "peer_route_pairs", json!([]));
+    obj_default(&mut v, "running", json!(false));
+    if let Some(n) = v.get_mut("my_node_info") {
+        densify_node(n);
+    }
+    if let Some(rs) = v.get_mut("routes").and_then(Value::as_array_mut) {
+        for r in rs {
+            densify_route(r);
+        }
+    }
+    if let Some(ps) = v.get_mut("peers").and_then(Value::as_array_mut) {
+        for p in ps {
+            densify_peer(p);
+        }
+    }
+    if let Some(prs) = v.get_mut("peer_route_pairs").and_then(Value::as_array_mut) {
+        for pr in prs {
+            if let Some(r) = pr.get_mut("route") {
+                densify_route(r);
+            } else {
+                obj_default(pr, "route", json!({}));
+                if let Some(r) = pr.get_mut("route") {
+                    densify_route(r);
+                }
+            }
+            if let Some(p) = pr.get_mut("peer") {
+                densify_peer(p);
+            }
+        }
+    }
+    serde_json::to_string(&v).unwrap_or_else(|_| s.to_string())
+}
 
 fn current_uuid() -> Result<Uuid, String> {
     CURRENT
