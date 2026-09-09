@@ -512,7 +512,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func healAfterWake(step: Int, baseline: Int?) {
-        guard let generation = self.activeTunnelGeneration else { return }
+        guard self.activeTunnelGeneration != nil else { return }
         let current = totalRxBytes()
 
         if let current, let baseline, current > baseline {
@@ -524,11 +524,14 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
         switch step {
         case 0:
+            // take the baseline, re-check shortly
             self.reasserting = true
             self.settingsQueue.asyncAfter(deadline: .now() + 6) { [weak self] in
                 self?.healAfterWake(step: 1, baseline: current)
             }
         case 1:
+            // still stalled after the grace period: drop every peer conn so
+            // the manual connectors re-dial. No destructive restart.
             logger.warning("wake(): traffic stalled, force_reconnect")
             var errPtr: UnsafePointer<CChar>? = nil
             _ = force_reconnect(&errPtr)
@@ -536,31 +539,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             self.settingsQueue.asyncAfter(deadline: .now() + 12) { [weak self] in
                 self?.healAfterWake(step: 2, baseline: baseline)
             }
+        case 2...6:
+            // keep watching; the top of this func resyncs + clears reasserting
+            // as soon as traffic returns.
+            self.settingsQueue.asyncAfter(deadline: .now() + 10) { [weak self] in
+                self?.healAfterWake(step: step + 1, baseline: baseline)
+            }
         default:
-            logger.error("wake(): still stalled after force_reconnect, restarting instance")
-            guard let options = self.lastOptions else {
-                self.cancelTunnelWithError("wake: no options to restart with")
-                return
-            }
-            _ = stop_network_instance()
-            var runErrPtr: UnsafePointer<CChar>? = nil
-            let ret = options.config.withCString { run_network_instance($0, &runErrPtr) }
-            let message = extractRustString(runErrPtr)
-            guard ret == 0 else {
-                self.cancelTunnelWithError(message ?? "wake restart failed")
-                return
-            }
-            self.registerRustStopCallback()
-            self.registerRunningInfoCallback()
-            self.lastAppliedSettings = nil
-            self.applyNetworkSettings(generation: generation) { error in
-                self.reasserting = false
-                if let error {
-                    logger.error("wake(): re-apply settings failed: \(error, privacy: .public)")
-                } else {
-                    logger.info("wake(): restart complete")
-                }
-            }
+            // Gave it ~90s. Stop showing "reconnecting"; EasyTier's connector
+            // loop keeps retrying on its own and the info refresher will pick
+            // up any recovery.
+            logger.warning("wake(): recovery still pending, leaving it to EasyTier")
+            self.reasserting = false
         }
     }
 }
