@@ -65,12 +65,37 @@ fn start_info_refresher() {
                     }
                     continue;
                 };
-                if let Some(info) = CTX.manager.network_info(uuid).await {
-                    if let Ok(s) = serde_json::to_string(&info) {
-                        let s = densify_running_info(&s);
-                        if let Ok(mut c) = INFO_CACHE.lock() {
-                            *c = Some(s);
+                // Run the snapshot in a child task: a hang is bounded by the
+                // timeout and a panic surfaces as a JoinError, either way this
+                // loop keeps going and the cache never freezes.
+                let manager = CTX.manager.clone();
+                let work = CTX.rt.spawn(async move {
+                    let mut info =
+                        tokio::time::timeout(Duration::from_secs(5), manager.network_info(uuid))
+                            .await
+                            .ok()??;
+                    for peer in &mut info.peers {
+                        for conn in &mut peer.conns {
+                            if !conn.loss_rate.is_finite() {
+                                conn.loss_rate = 0.0;
+                            }
                         }
+                    }
+                    for pair in &mut info.peer_route_pairs {
+                        if let Some(peer) = pair.peer.as_mut() {
+                            for conn in &mut peer.conns {
+                                if !conn.loss_rate.is_finite() {
+                                    conn.loss_rate = 0.0;
+                                }
+                            }
+                        }
+                    }
+                    let s = serde_json::to_string(&info).ok()?;
+                    Some(densify_running_info(&s))
+                });
+                if let Ok(Some(s)) = work.await {
+                    if let Ok(mut c) = INFO_CACHE.lock() {
+                        *c = Some(s);
                     }
                 }
             }

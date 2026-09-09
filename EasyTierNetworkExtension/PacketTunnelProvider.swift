@@ -483,7 +483,55 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     }
     
     override func wake() {
-        // Add code here to wake up.
+        logger.warning("wake(): triggered")
+        settingsQueue.asyncAfter(deadline: .now() + 6) { [weak self] in
+            guard let self, let generation = self.activeTunnelGeneration else { return }
+
+            var jsonPtr: UnsafePointer<CChar>? = nil
+            var errPtr: UnsafePointer<CChar>? = nil
+            var alive = false
+            let rc = get_running_info(&jsonPtr, &errPtr)
+            if let snapshot = extractRustString(jsonPtr) {
+                alive = rc == 0
+                    && snapshot.contains("\"running\":true")
+                    && (snapshot.contains("\"peers\":[{") || snapshot.contains("\"peer_route_pairs\":[{"))
+            }
+            _ = extractRustString(errPtr)
+
+            if alive {
+                logger.info("wake(): core still healthy")
+                self.enqueueSettingsUpdate()
+                return
+            }
+
+            logger.warning("wake(): core not healthy, restarting instance in place")
+            guard let options = self.lastOptions else {
+                self.cancelTunnelWithError("wake: no options to restart with")
+                return
+            }
+            self.reasserting = true
+            _ = stop_network_instance()
+
+            var runErrPtr: UnsafePointer<CChar>? = nil
+            let ret = options.config.withCString { run_network_instance($0, &runErrPtr) }
+            guard ret == 0 else {
+                let message = extractRustString(runErrPtr) ?? "Unknown"
+                logger.error("wake(): restart failed: \(message, privacy: .public)")
+                self.cancelTunnelWithError(message)
+                return
+            }
+            self.registerRustStopCallback()
+            self.registerRunningInfoCallback()
+            self.lastAppliedSettings = nil
+            self.applyNetworkSettings(generation: generation) { error in
+                self.reasserting = false
+                if let error {
+                    logger.error("wake(): re-apply settings failed: \(error, privacy: .public)")
+                } else {
+                    logger.info("wake(): restart complete")
+                }
+            }
+        }
     }
 }
 
