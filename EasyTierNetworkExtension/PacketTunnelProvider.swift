@@ -484,40 +484,70 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     
     override func wake() {
         logger.warning("wake(): triggered")
-        settingsQueue.asyncAfter(deadline: .now() + 6) { [weak self] in
-            guard let self, let generation = self.activeTunnelGeneration else { return }
+        settingsQueue.asyncAfter(deadline: .now() + 15) { [weak self] in
+            self?.healAfterWake(step: 0, baseline: nil)
+        }
+    }
 
-            var jsonPtr: UnsafePointer<CChar>? = nil
+    private func totalRxBytes() -> Int? {
+        var jsonPtr: UnsafePointer<CChar>? = nil
+        var errPtr: UnsafePointer<CChar>? = nil
+        let rc = get_running_info(&jsonPtr, &errPtr)
+        let snapshot = extractRustString(jsonPtr)
+        _ = extractRustString(errPtr)
+        guard rc == 0, let snapshot, snapshot.contains("\"running\":true") else { return nil }
+        var total = 0
+        var cursor = snapshot.startIndex
+        while let r = snapshot.range(of: "\"rx_bytes\":", range: cursor..<snapshot.endIndex) {
+            var k = r.upperBound
+            var digits = ""
+            while k < snapshot.endIndex, snapshot[k].isNumber {
+                digits.append(snapshot[k])
+                k = snapshot.index(after: k)
+            }
+            total += Int(digits) ?? 0
+            cursor = k
+        }
+        return total
+    }
+
+    private func healAfterWake(step: Int, baseline: Int?) {
+        guard let generation = self.activeTunnelGeneration else { return }
+        let current = totalRxBytes()
+
+        if let current, let baseline, current > baseline {
+            logger.info("wake(): traffic moving (\(baseline) -> \(current)), healthy")
+            self.reasserting = false
+            self.enqueueSettingsUpdate()
+            return
+        }
+
+        switch step {
+        case 0:
+            self.reasserting = true
+            self.settingsQueue.asyncAfter(deadline: .now() + 6) { [weak self] in
+                self?.healAfterWake(step: 1, baseline: current)
+            }
+        case 1:
+            logger.warning("wake(): traffic stalled, force_reconnect")
             var errPtr: UnsafePointer<CChar>? = nil
-            var alive = false
-            let rc = get_running_info(&jsonPtr, &errPtr)
-            if let snapshot = extractRustString(jsonPtr) {
-                alive = rc == 0
-                    && snapshot.contains("\"running\":true")
-                    && (snapshot.contains("\"peers\":[{") || snapshot.contains("\"peer_route_pairs\":[{"))
-            }
+            _ = force_reconnect(&errPtr)
             _ = extractRustString(errPtr)
-
-            if alive {
-                logger.info("wake(): core still healthy")
-                self.enqueueSettingsUpdate()
-                return
+            self.settingsQueue.asyncAfter(deadline: .now() + 12) { [weak self] in
+                self?.healAfterWake(step: 2, baseline: baseline)
             }
-
-            logger.warning("wake(): core not healthy, restarting instance in place")
+        default:
+            logger.error("wake(): still stalled after force_reconnect, restarting instance")
             guard let options = self.lastOptions else {
                 self.cancelTunnelWithError("wake: no options to restart with")
                 return
             }
-            self.reasserting = true
             _ = stop_network_instance()
-
             var runErrPtr: UnsafePointer<CChar>? = nil
             let ret = options.config.withCString { run_network_instance($0, &runErrPtr) }
+            let message = extractRustString(runErrPtr)
             guard ret == 0 else {
-                let message = extractRustString(runErrPtr) ?? "Unknown"
-                logger.error("wake(): restart failed: \(message, privacy: .public)")
-                self.cancelTunnelWithError(message)
+                self.cancelTunnelWithError(message ?? "wake restart failed")
                 return
             }
             self.registerRustStopCallback()

@@ -557,6 +557,44 @@ pub extern "C" fn stop_network_instance() -> std::ffi::c_int {
     0
 }
 
+/// # Safety
+/// Close every peer connection; the manual connectors then re-dial on their
+/// next tick. Instance, TUN, routes and the assigned address are kept.
+#[no_mangle]
+pub extern "C" fn force_reconnect(err_msg: *mut *const std::ffi::c_char) -> std::ffi::c_int {
+    let impl_func = || -> Result<(), String> {
+        let uuid = current_uuid()?;
+        let instance = CTX
+            .manager
+            .instance(uuid)
+            .ok_or_else(|| "instance not found".to_string())?;
+        let closed = CTX.rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut n = 0usize;
+                for snap in instance.peer_snapshots().await {
+                    let mut ids = snap.directly_connected_conns.clone();
+                    if let Some(d) = snap.default_conn_id {
+                        if !ids.contains(&d) {
+                            ids.push(d);
+                        }
+                    }
+                    for cid in ids {
+                        if instance.close_peer_conn(snap.peer_id, &cid).await.is_ok() {
+                            n += 1;
+                        }
+                    }
+                }
+                n
+            })
+            .await
+            .unwrap_or(0)
+        });
+        tracing::warn!(closed, "force_reconnect: dropped peer conns");
+        Ok(())
+    };
+    ret(err_msg, impl_func())
+}
+
 fn subscribe_current() -> Result<EventBusSubscriber, String> {
     let uuid = current_uuid()?;
     let instance = CTX

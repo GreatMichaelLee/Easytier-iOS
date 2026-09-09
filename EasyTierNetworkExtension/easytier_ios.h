@@ -28,6 +28,8 @@ int32_t get_running_info(const char **json, const char **err_msg);
 
 int32_t get_latest_error_msg(const char **msg, const char **err_msg);
 
+int32_t force_reconnect(const char **err_msg);
+
 #ifdef __cplusplus
 }
 #endif
