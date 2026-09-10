@@ -210,11 +210,11 @@ struct StatusView<Manager: NetworkExtensionManagerProtocol>: View {
             HStack(spacing: 42) {
                 TrafficItem(
                     trafficType: .Rx,
-                    value: (status?.sum(of: \.rxBytes)),
+                    value: status?.displayRxBytes,
                 )
                 TrafficItem(
                     trafficType: .Tx,
-                    value: (status?.sum(of: \.txBytes)),
+                    value: status?.displayTxBytes,
                 )
             }
 
@@ -247,13 +247,13 @@ struct StatusView<Manager: NetworkExtensionManagerProtocol>: View {
                 if let l4 = status?.myNodeInfo?.ips?.interfaceIPv4s?.first?.description {
                     StatusInfoRow(label: "local_ipv4", value: LocalizedStringKey(stringLiteral: l4), icon: "wifi") { showIPInfo = true }
                 }
-                if let rx = status?.sum(of: \.rxBytes), rx > 0 {
+                if let rx = status?.displayRxBytes, rx > 0 {
                     Divider()
-                    StatusInfoRow(label: "total_rx", value: LocalizedStringKey(stringLiteral: trafficSummary(bytes: rx, packets: status?.sum(of: \.rxPackets) ?? 0)), icon: "arrow.down")
+                    StatusInfoRow(label: "total_rx", value: LocalizedStringKey(stringLiteral: trafficSummary(bytes: rx, packets: status?.displayRxPackets ?? 0)), icon: "arrow.down")
                 }
-                if let tx = status?.sum(of: \.txBytes), tx > 0 {
+                if let tx = status?.displayTxBytes, tx > 0 {
                     Divider()
-                    StatusInfoRow(label: "total_tx", value: LocalizedStringKey(stringLiteral: trafficSummary(bytes: tx, packets: status?.sum(of: \.txPackets) ?? 0)), icon: "arrow.up")
+                    StatusInfoRow(label: "total_tx", value: LocalizedStringKey(stringLiteral: trafficSummary(bytes: tx, packets: status?.displayTxPackets ?? 0)), icon: "arrow.up")
                 }
             }
             .padding(.top, 4)

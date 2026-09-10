@@ -52,6 +52,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var lastAppliedSettings: TunnelNetworkSettingsSnapshot?
     private var needReapplySettings: Bool = false
     private var wakeHealInFlight = false
+    private var lastWakeHealAt: Date = .distantPast
 
     private func resetTunnelSessionState() {
         lastOptions = nil
@@ -59,6 +60,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         needReapplySettings = false
         settingsApplyGeneration = nil
         wakeHealInFlight = false
+        lastWakeHealAt = .distantPast
         reasserting = false
     }
 
@@ -488,13 +490,15 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         logger.warning("wake(): triggered")
         settingsQueue.async { [weak self] in
             guard let self, let generation = self.activeTunnelGeneration else { return }
-            guard !self.wakeHealInFlight else {
-                logger.info("wake(): heal already in flight, ignoring")
-                return
-            }
+            guard !self.wakeHealInFlight else { return }
+            // iOS calls wake() on every brief resume -- every few seconds while
+            // the device is idle. Probe tunnel health at most once a minute, and
+            // never surface `reasserting` unless a probe actually finds traffic
+            // stalled; otherwise the VPN shows "reconnecting" almost constantly
+            // and the app's poller looks frozen.
+            guard Date().timeIntervalSince(self.lastWakeHealAt) > 60 else { return }
             self.wakeHealInFlight = true
-            self.reasserting = true
-            self.settingsQueue.asyncAfter(deadline: .now() + 15) { [weak self] in
+            self.settingsQueue.asyncAfter(deadline: .now() + 8) { [weak self] in
                 self?.wakeHealSample(generation: generation)
             }
         }
@@ -505,9 +509,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // that path already cleared wakeHealInFlight via resetTunnelSessionState,
         // and the flag now belongs to the new tunnel's chain -- don't touch it.
         guard self.activeTunnelGeneration == generation else { return }
-        // Monotonic across peer-conn churn: a re-dial (ours or EasyTier's) mints
-        // a fresh conn_id with a zeroed counter, but the Rust accumulator keeps
-        // climbing, so a plain before/after comparison stays correct.
+        // overlay_rx_total() is monotonic across peer-conn churn, so a plain
+        // before/after comparison over a few seconds is a sound "traffic moving"
+        // test.
         let before = overlay_rx_total()
         self.settingsQueue.asyncAfter(deadline: .now() + 5) { [weak self] in
             self?.wakeHealDecide(generation: generation, before: before)
@@ -516,17 +520,37 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
 
     private func wakeHealDecide(generation: UInt64, before: UInt64) {
         guard self.activeTunnelGeneration == generation else { return }
-        self.wakeHealInFlight = false
-        self.reasserting = false
+        self.lastWakeHealAt = Date()
         let after = overlay_rx_total()
         if after > before {
-            logger.info("wake(): overlay rx \(before) -> \(after), moving, recovered on its own")
+            // Healthy: nothing was ever shown to the user. Stay silent.
+            self.wakeHealInFlight = false
             return
         }
-        logger.warning("wake(): overlay rx stalled at \(before) ~20s after wake, force_reconnect")
+        logger.warning("wake(): overlay rx stalled at \(before) ~13s after wake, force_reconnect")
+        self.reasserting = true
         var errPtr: UnsafePointer<CChar>? = nil
         _ = force_reconnect(&errPtr)
         _ = extractRustString(errPtr)
+        self.settingsQueue.asyncAfter(deadline: .now() + 12) { [weak self] in
+            self?.wakeHealRecheck(generation: generation, before: after)
+        }
+    }
+
+    private func wakeHealRecheck(generation: UInt64, before: UInt64) {
+        // Stale generation: a newer chain owns the flag now -- don't touch it.
+        guard self.activeTunnelGeneration == generation else { return }
+        self.wakeHealInFlight = false
+        // Clear `reasserting` either way: traffic came back, or EasyTier's own
+        // connector loop keeps retrying and we shouldn't pin the UI in
+        // "reconnecting" forever.
+        self.reasserting = false
+        let after = overlay_rx_total()
+        if after > before {
+            logger.info("wake(): recovered after force_reconnect (\(before) -> \(after))")
+        } else {
+            logger.warning("wake(): still stalled after force_reconnect, leaving it to EasyTier")
+        }
     }
 }
 

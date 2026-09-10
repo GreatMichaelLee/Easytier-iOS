@@ -122,11 +122,11 @@ struct MenuBarView<Manager: NetworkExtensionManagerProtocol>: View {
                 HStack(spacing: 24) {
                     TrafficItem(
                         trafficType: .Rx,
-                        value: status?.sum(of: \.rxBytes)
+                        value: status?.displayRxBytes
                     )
                     TrafficItem(
                         trafficType: .Tx,
-                        value: status?.sum(of: \.txBytes)
+                        value: status?.displayTxBytes
                     )
                 }
 

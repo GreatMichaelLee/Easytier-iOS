@@ -329,6 +329,10 @@ struct NetworkStatus: Codable {
     var peerRoutePairs: [PeerRoutePair]
     var running: Bool
     var errorMsg: String?
+    var sessionRxBytes: Int?
+    var sessionTxBytes: Int?
+    var sessionRxPackets: Int?
+    var sessionTxPackets: Int?
 
     enum CodingKeys: String, CodingKey {
         case devName = "dev_name"
@@ -336,6 +340,10 @@ struct NetworkStatus: Codable {
         case events, routes, peers, running
         case peerRoutePairs = "peer_route_pairs"
         case errorMsg = "error_msg"
+        case sessionRxBytes = "session_rx_bytes"
+        case sessionTxBytes = "session_tx_bytes"
+        case sessionRxPackets = "session_rx_packets"
+        case sessionTxPackets = "session_tx_packets"
     }
 
     func sum(of keyPath: KeyPath<PeerConnStats, Int>) -> Int {
@@ -345,4 +353,12 @@ struct NetworkStatus: Codable {
             .map { $0[keyPath: keyPath] }
             .reduce(0, +)
     }
+
+    /// Session-scoped monotonic totals from the core. `sum` (raw per-conn) is
+    /// the fallback for cores that don't emit `session_*`. Unlike `sum`, these
+    /// don't drop when a peer conn is re-dialed under a still-connected tunnel.
+    var displayRxBytes: Int { sessionRxBytes ?? sum(of: \.rxBytes) }
+    var displayTxBytes: Int { sessionTxBytes ?? sum(of: \.txBytes) }
+    var displayRxPackets: Int { sessionRxPackets ?? sum(of: \.rxPackets) }
+    var displayTxPackets: Int { sessionTxPackets ?? sum(of: \.txPackets) }
 }

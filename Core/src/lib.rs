@@ -56,55 +56,92 @@ static CONFIGURED_IPV6: Lazy<ArcSwapOption<String>> = Lazy::new(ArcSwapOption::e
 static INFO_CACHE: Lazy<ArcSwapOption<String>> = Lazy::new(ArcSwapOption::empty);
 static REFRESHER: Once = Once::new();
 
-/// Lifetime count of overlay bytes received, accumulated per connection so it
-/// never goes backwards when a peer conn is torn down and re-dialed -- our
-/// force_reconnect and EasyTier's own reconnect both mint a fresh conn_id with
-/// a zeroed byte counter. Written only by the single info-refresher task; read
-/// lock-free by overlay_rx_total() from the FFI thread.
-static RX_ACCUM: AtomicU64 = AtomicU64::new(0);
+/// Per-connection traffic totals for the current tunnel session, accumulated so
+/// they never go backwards when a peer conn is torn down and re-dialed (our
+/// force_reconnect, EasyTier's own reconnect, a pingpong timeout -- all mint a
+/// fresh conn_id with zeroed counters). Reset only when the network instance
+/// changes (a new run_network_instance == the iOS tunnel re-establishing), so
+/// within one connection the dashboard numbers only ever climb. Written by the
+/// single info-refresher task; SESSION_RX is also read by overlay_rx_total().
+static SESSION_RX: AtomicU64 = AtomicU64::new(0);
+static SESSION_TX: AtomicU64 = AtomicU64::new(0);
+static SESSION_RX_PKT: AtomicU64 = AtomicU64::new(0);
+static SESSION_TX_PKT: AtomicU64 = AtomicU64::new(0);
 
-/// Fold one densified running-info snapshot into RX_ACCUM. `prev` is the
-/// refresher task's private per-conn rx from the previous tick.
-fn accumulate_rx(densified: &str, prev: &mut HashMap<String, u64>) {
-    let Ok(v) = serde_json::from_str::<Value>(densified) else {
-        return;
-    };
-    let mut cur: HashMap<String, u64> = HashMap::new();
-    collect_conn_rx(&v, &mut cur);
-    let mut delta: u64 = 0;
-    for (id, &rx) in &cur {
-        // new conn -> full rx; existing conn -> growth; a decrease within one
-        // conn_id (shouldn't happen) contributes 0.
-        delta = delta.saturating_add(rx.saturating_sub(prev.get(id).copied().unwrap_or(0)));
-    }
-    if delta > 0 {
-        RX_ACCUM.fetch_add(delta, Ordering::Relaxed);
-    }
-    *prev = cur;
+fn reset_session_totals() {
+    SESSION_RX.store(0, Ordering::Relaxed);
+    SESSION_TX.store(0, Ordering::Relaxed);
+    SESSION_RX_PKT.store(0, Ordering::Relaxed);
+    SESSION_TX_PKT.store(0, Ordering::Relaxed);
 }
 
-/// conn_id -> stats.rx_bytes for every PeerConnInfo in the tree, deduped by
-/// conn_id (a conn appears under both `peers` and `peer_route_pairs`).
-fn collect_conn_rx(v: &Value, out: &mut HashMap<String, u64>) {
+/// [rx_bytes, tx_bytes, rx_packets, tx_packets]
+type ConnStats = [u64; 4];
+
+/// Fold one densified snapshot into the session totals, then inject them back as
+/// top-level `session_*` fields for the iOS dashboard. `prev` is the refresher
+/// task's per-conn view from the previous tick.
+fn accumulate_traffic(densified: String, prev: &mut HashMap<String, ConnStats>) -> String {
+    let Ok(mut v) = serde_json::from_str::<Value>(&densified) else {
+        return densified;
+    };
+    let mut cur: HashMap<String, ConnStats> = HashMap::new();
+    collect_conn_stats(&v, &mut cur);
+    let mut delta: ConnStats = [0; 4];
+    for (id, vals) in &cur {
+        let p = prev.get(id).copied().unwrap_or([0; 4]);
+        for i in 0..4 {
+            // new conn -> full value; existing conn -> growth; a per-conn_id
+            // decrease (shouldn't happen) contributes 0.
+            delta[i] = delta[i].saturating_add(vals[i].saturating_sub(p[i]));
+        }
+    }
+    SESSION_RX.fetch_add(delta[0], Ordering::Relaxed);
+    SESSION_TX.fetch_add(delta[1], Ordering::Relaxed);
+    SESSION_RX_PKT.fetch_add(delta[2], Ordering::Relaxed);
+    SESSION_TX_PKT.fetch_add(delta[3], Ordering::Relaxed);
+    *prev = cur;
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("session_rx_bytes".into(), json!(SESSION_RX.load(Ordering::Relaxed)));
+        obj.insert("session_tx_bytes".into(), json!(SESSION_TX.load(Ordering::Relaxed)));
+        obj.insert("session_rx_packets".into(), json!(SESSION_RX_PKT.load(Ordering::Relaxed)));
+        obj.insert("session_tx_packets".into(), json!(SESSION_TX_PKT.load(Ordering::Relaxed)));
+    }
+    serde_json::to_string(&v).unwrap_or(densified)
+}
+
+/// conn_id -> [rx_bytes, tx_bytes, rx_packets, tx_packets] for every
+/// PeerConnInfo in the tree, deduped by conn_id (a conn appears under both
+/// `peers` and `peer_route_pairs`).
+fn collect_conn_stats(v: &Value, out: &mut HashMap<String, ConnStats>) {
     match v {
         Value::Object(m) => {
             if let Some(Value::String(id)) = m.get("conn_id") {
-                let rx = m
-                    .get("stats")
-                    .and_then(|st| st.get("rx_bytes"))
-                    .and_then(|x| match x {
-                        Value::Number(n) => n.as_u64(),
-                        Value::String(s) => s.parse().ok(),
-                        _ => None,
-                    })
-                    .unwrap_or(0);
-                out.insert(id.clone(), rx);
+                let field = |k: &str| {
+                    m.get("stats")
+                        .and_then(|st| st.get(k))
+                        .and_then(|x| match x {
+                            Value::Number(n) => n.as_u64(),
+                            Value::String(s) => s.parse().ok(),
+                            _ => None,
+                        })
+                        .unwrap_or(0)
+                };
+                out.insert(
+                    id.clone(),
+                    [
+                        field("rx_bytes"),
+                        field("tx_bytes"),
+                        field("rx_packets"),
+                        field("tx_packets"),
+                    ],
+                );
             }
             for child in m.values() {
-                collect_conn_rx(child, out);
+                collect_conn_stats(child, out);
             }
         }
-        Value::Array(a) => a.iter().for_each(|x| collect_conn_rx(x, out)),
+        Value::Array(a) => a.iter().for_each(|x| collect_conn_stats(x, out)),
         _ => {}
     }
 }
@@ -114,20 +151,26 @@ fn start_info_refresher() {
         CTX.rt.spawn(async {
             let mut tick = tokio::time::interval(Duration::from_millis(1000));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            let mut prev_rx: HashMap<String, u64> = HashMap::new();
+            let mut prev: HashMap<String, ConnStats> = HashMap::new();
+            let mut last_uuid: Option<Uuid> = None;
             loop {
                 tick.tick().await;
                 let uuid = CURRENT.load().as_ref().map(|u| **u);
+                if uuid != last_uuid {
+                    // new tunnel session (or a stop): traffic totals start fresh
+                    prev.clear();
+                    reset_session_totals();
+                    last_uuid = uuid;
+                }
                 let Some(uuid) = uuid else {
                     INFO_CACHE.store(None);
-                    prev_rx.clear();
                     continue;
                 };
                 // Run the snapshot in a child task: a hang is bounded by the
                 // timeout and a panic surfaces as a JoinError, either way this
                 // loop keeps going and the cache never freezes.
                 let manager = CTX.manager.clone();
-                let work = CTX.rt.spawn(async move {
+                let mut work = CTX.rt.spawn(async move {
                     let mut info =
                         tokio::time::timeout(Duration::from_secs(5), manager.network_info(uuid))
                             .await
@@ -151,9 +194,17 @@ fn start_info_refresher() {
                     let s = serde_json::to_string(&info).ok()?;
                     Some(densify_running_info(&s))
                 });
-                if let Ok(Some(s)) = work.await {
-                    accumulate_rx(&s, &mut prev_rx);
-                    INFO_CACHE.store(Some(Arc::new(s)));
+                // network_info() is already capped at 5s, but densify /
+                // serialize run outside that and a starved worker can still park
+                // work.await -- cap the whole job so this loop keeps ticking and
+                // INFO_CACHE never freezes.
+                match tokio::time::timeout(Duration::from_secs(8), &mut work).await {
+                    Ok(Ok(Some(s))) => {
+                        let s = accumulate_traffic(s, &mut prev);
+                        INFO_CACHE.store(Some(Arc::new(s)));
+                    }
+                    Ok(_) => {}             // finished with None, or the task panicked
+                    Err(_) => work.abort(), // wedged: drop it, next tick spawns a fresh one
                 }
             }
         });
@@ -736,13 +787,13 @@ pub extern "C" fn register_running_info_callback(
 }
 
 /// # Safety
-/// Lifetime count of overlay bytes received, monotonic across peer-conn churn.
-/// The iOS extension's wake() heal check samples this before/after ~20s to tell
-/// "recovered on its own" from "stalled, needs force_reconnect".
+/// Bytes received this tunnel session, monotonic across peer-conn churn (resets
+/// only when the network instance changes). The iOS wake() heal check samples
+/// this before/after ~13s to tell "recovered on its own" from "stalled".
 #[no_mangle]
 pub extern "C" fn overlay_rx_total() -> u64 {
     start_info_refresher();
-    RX_ACCUM.load(Ordering::Relaxed)
+    SESSION_RX.load(Ordering::Relaxed)
 }
 
 /// # Safety
