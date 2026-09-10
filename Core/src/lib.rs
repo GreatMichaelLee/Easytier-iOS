@@ -228,6 +228,19 @@ fn d_url(v: &mut Value) {
     od(v, "url", json!(""));
 }
 
+/// pbjson writes an all-zero IPv4Addr as `{}`; Swift needs the `addr` u32.
+fn d_v4(v: &mut Value) {
+    od(v, "addr", json!(0));
+}
+
+/// pbjson writes an all-zero Uuid / IPv6Addr as `{}` and omits any zero part;
+/// the Swift UUID / IPv6Addr structs decode all four u32 parts as required.
+fn d_v6(v: &mut Value) {
+    for k in ["part1", "part2", "part3", "part4"] {
+        od(v, k, json!(0));
+    }
+}
+
 fn d_cidr(v: &mut Value) {
     od(v, "network_length", json!(0));
     if let Some(a) = v.get_mut("address") {
@@ -338,12 +351,24 @@ fn d_node(v: &mut Value) {
         d_stun(x);
     }
     if let Some(x) = v.get_mut("ips") {
-        for k in [
-            "interface_ipv4s",
-            "interface_ipv6s",
-            "listeners",
-        ] {
+        for k in ["interface_ipv4s", "interface_ipv6s", "listeners"] {
             od(x, k, json!([]));
+        }
+        if let Some(a) = x.get_mut("public_ipv4") {
+            d_v4(a);
+        }
+        if let Some(a) = x.get_mut("public_ipv6") {
+            d_v6(a);
+        }
+        if let Some(arr) = x.get_mut("interface_ipv4s").and_then(Value::as_array_mut) {
+            for a in arr {
+                d_v4(a);
+            }
+        }
+        if let Some(arr) = x.get_mut("interface_ipv6s").and_then(Value::as_array_mut) {
+            for a in arr {
+                d_v6(a);
+            }
         }
     }
 }
@@ -399,6 +424,20 @@ fn d_peer(v: &mut Value) {
     od(v, "peer_id", json!(0));
     od(v, "conns", json!([]));
     od(v, "directly_connected_conns", json!([]));
+    // Uuid = 4x u32, same JSON shape as IPv6Addr. pbjson serialises an all-zero
+    // conn id as `{}`, which makes Swift's required part1..4 keys missing and
+    // throws the whole NetworkStatus decode -> the dashboard stops updating.
+    if let Some(d) = v.get_mut("default_conn_id") {
+        d_v6(d);
+    }
+    if let Some(arr) = v
+        .get_mut("directly_connected_conns")
+        .and_then(Value::as_array_mut)
+    {
+        for u in arr {
+            d_v6(u);
+        }
+    }
     if let Some(cs) = v.get_mut("conns").and_then(Value::as_array_mut) {
         for c in cs {
             d_conn(c);

@@ -12,8 +12,6 @@ struct StatusView<Manager: NetworkExtensionManagerProtocol>: View {
     @Environment(\.scenePhase) var scenePhase
     @Environment(\.horizontalSizeClass) var sizeClass
     @AppStorage("statusRefreshInterval") var statusRefreshInterval: Double = 1.0
-    @State var timer = Timer.publish(every: 1.0, on: .main, in: .common)
-    @State var timerSubscription: Cancellable?
     @State var status: NetworkStatus?
     @State var now = Date()
     
@@ -58,34 +56,21 @@ struct StatusView<Manager: NetworkExtensionManagerProtocol>: View {
         }
         .onAppear {
             refreshStatus()
-            startTimer()
         }
-        .onDisappear {
-            stopTimer()
-        }
-        .onChange(of: scenePhase) { newPhase in
-            switch newPhase {
-            case .active:
-                refreshStatus()
-                startTimer()
-            case .inactive, .background:
-                stopTimer()
-            @unknown default:
-                break
+        .task(id: RefreshLoopKey(active: scenePhase == .active, interval: statusRefreshInterval)) {
+            // `.task(id:)` restarts this loop on every foreground/interval change
+            // and cancels it when the view goes away. The old Combine timer
+            // subscription silently died the first time scenePhase blipped
+            // inactive and its cancellable was released.
+            guard scenePhase == .active else { return }
+            let step = UInt64((max(0.2, statusRefreshInterval) * 1_000_000_000).rounded())
+            while !Task.isCancelled {
+                await MainActor.run {
+                    now = Date()
+                    refreshStatus()
+                }
+                try? await Task.sleep(nanoseconds: step)
             }
-        }
-        .onChange(of: statusRefreshInterval) { _ in
-            guard timerSubscription != nil else { return }
-            stopTimer()
-            startTimer()
-        }
-        .onReceive(timer) { _ in
-            if [.inactive, .background].contains(scenePhase) {
-                stopTimer()
-                return
-            }
-            now = Date()
-            refreshStatus()
         }
         .sheet(item: $selectedPeerRoute) { selection in
             PeerConnDetailSheet(status: $status, peerRouteID: selection.id)
@@ -299,17 +284,11 @@ struct StatusView<Manager: NetworkExtensionManagerProtocol>: View {
         }
     }
 
-    func startTimer() {
-        guard timerSubscription == nil else { return }
-        let interval = max(0.2, statusRefreshInterval)
-        timer = Timer.publish(every: interval, on: .main, in: .common)
-        timerSubscription = timer.connect()
-    }
+}
 
-    private func stopTimer() {
-        timerSubscription?.cancel()
-        timerSubscription = nil
-    }
+private struct RefreshLoopKey: Equatable {
+    let active: Bool
+    let interval: Double
 }
 
 struct PeerRowView<RightView>: View where RightView: View {

@@ -191,7 +191,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         }
         settingsApplyGeneration = generation
         needReapplySettings = false
-        reasserting = true
+        // `reasserting` is set below, only if the settings actually change --
+        // most info-changed callbacks resolve to a no-op and flipping it here
+        // just flickers the VPN status to "reconnecting".
 
         settingsQueue.asyncAfter(deadline: .now() + debounceInterval) { [weak self] in
             guard let self else {
@@ -227,6 +229,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
                 return
             }
 
+            // Settings really differ -- now we touch the tunnel.
+            self.reasserting = true
             let needSetTunFd = self.shouldUpdateTunFd(old: self.lastAppliedSettings, new: newSnapshot)
             logger.info("applyNetworkSettings() need set tunfd: \(needSetTunFd), settings: \(settings, privacy: .public)")
             self.setTunnelNetworkSettings(settings) { [weak self] error in
