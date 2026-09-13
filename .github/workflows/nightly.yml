@@ -130,7 +130,7 @@ jobs:
             echo "Automated Release build from [\`${SHORT_SHA}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA})."
             echo
             echo "- Build configuration: \`${BUILD_CONFIGURATION}\`"
-            echo "- Code signing: ad-hoc with Xcode Team ID \`${TEAM_ID}\` and complete app/extension entitlements"
+            echo "- Code signing: none (genuinely unsigned, sign it yourself)"
             echo "- Built: ${BUILD_TIME}"
             echo "- Workflow run: [#${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
             echo
