@@ -16,12 +16,12 @@ concurrency:
 env:
   SCHEME: EasyTier
   BUILD_CONFIGURATION: Release
-  IPA_NAME: EasyTier-nightly-trollstore.ipa
+  UNSIGNED_IPA_NAME: EasyTier-nightly-unsigned.ipa
   TEAM_ID: Z78N6GQ84P
 
 jobs:
   build-and-release:
-    name: Build and publish TrollStore IPA
+    name: Build and publish unsigned IPA
     runs-on: macos-26
     timeout-minutes: 90
 
@@ -89,77 +89,7 @@ jobs:
             DEVELOPMENT_TEAM="${TEAM_ID}" \
             CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}"
 
-      - name: Ad-hoc sign app for TrollStore
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APP_PATH="${ARCHIVE_PATH}/Products/Applications/EasyTier.app"
-          TUNNEL_PATH="${APP_PATH}/PlugIns/EasyTierNetworkExtension.appex"
-          WIDGET_PATH="${APP_PATH}/PlugIns/EasyTierWidgetExtension.appex"
-          APP_ENTITLEMENTS="${RUNNER_TEMP}/EasyTier.signing.entitlements"
-          TUNNEL_ENTITLEMENTS="${RUNNER_TEMP}/EasyTierNetworkExtension.signing.entitlements"
-          WIDGET_ENTITLEMENTS="${RUNNER_TEMP}/EasyTierWidgetExtension.signing.entitlements"
-
-          create_signing_entitlements() {
-            local source_path="$1"
-            local bundle_path="$2"
-            local output_path="$3"
-            local bundle_identifier
-            local application_identifier
-
-            bundle_identifier="$(
-              /usr/libexec/PlistBuddy \
-                -c "Print :CFBundleIdentifier" \
-                "${bundle_path}/Info.plist"
-            )"
-            application_identifier="${TEAM_ID}.app.turquoise1634.pearl6659"
-
-            cp "${source_path}" "${output_path}"
-            /usr/libexec/PlistBuddy \
-              -c "Add :application-identifier string ${application_identifier}" \
-              -c "Add :com.apple.developer.team-identifier string ${TEAM_ID}" \
-              -c "Add :keychain-access-groups array" \
-              -c "Add :keychain-access-groups:0 string ${application_identifier}" \
-              "${output_path}"
-          }
-
-          create_signing_entitlements \
-            EasyTier/EasyTier.entitlements \
-            "${APP_PATH}" \
-            "${APP_ENTITLEMENTS}"
-          create_signing_entitlements \
-            EasyTierNetworkExtension/EasyTierNetworkExtension.entitlements \
-            "${TUNNEL_PATH}" \
-            "${TUNNEL_ENTITLEMENTS}"
-          create_signing_entitlements \
-            EasyTierWidgetExtension/EasyTierWidgetExtension.entitlements \
-            "${WIDGET_PATH}" \
-            "${WIDGET_ENTITLEMENTS}"
-
-          codesign \
-            --force \
-            --sign - \
-            --timestamp=none \
-            --generate-entitlement-der \
-            --entitlements "${WIDGET_ENTITLEMENTS}" \
-            "${WIDGET_PATH}"
-          codesign \
-            --force \
-            --sign - \
-            --timestamp=none \
-            --generate-entitlement-der \
-            --entitlements "${TUNNEL_ENTITLEMENTS}" \
-            "${TUNNEL_PATH}"
-          codesign \
-            --force \
-            --sign - \
-            --timestamp=none \
-            --generate-entitlement-der \
-            --entitlements "${APP_ENTITLEMENTS}" \
-            "${APP_PATH}"
-
-      - name: Package TrollStore IPA
+      - name: Package unsigned IPA
         shell: bash
         run: |
           set -euo pipefail
@@ -170,14 +100,18 @@ jobs:
 
           (
             cd "${PACKAGE_PATH}"
-            /usr/bin/zip -qry "${EXPORT_PATH}/${IPA_NAME}" Payload
+            /usr/bin/zip -qry "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}" Payload
           )
+
+          ( cd "${EXPORT_PATH}" && shasum -a 256 "${UNSIGNED_IPA_NAME}" > "${UNSIGNED_IPA_NAME}.sha256" )
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: EasyTier-nightly-trollstore-${{ github.run_number }}
-          path: ${{ runner.temp }}/export/EasyTier-nightly-trollstore.ipa
+          name: EasyTier-nightly-unsigned-${{ github.run_number }}
+          path: |
+            ${{ runner.temp }}/export/EasyTier-nightly-unsigned.ipa
+            ${{ runner.temp }}/export/EasyTier-nightly-unsigned.ipa.sha256
           if-no-files-found: error
           retention-days: 14
 
@@ -200,7 +134,7 @@ jobs:
             echo "- Built: ${BUILD_TIME}"
             echo "- Workflow run: [#${GITHUB_RUN_NUMBER}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})"
             echo
-            echo "> This credentials-free IPA is prepared for TrollStore. Normal iOS installation still requires signing with an Apple provisioning profile."
+            echo "> \`${UNSIGNED_IPA_NAME}\` is genuinely unsigned -- sign it yourself with your own Apple Developer account/provisioning profile (Xcode, AltStore, Sideloadly, etc.) before installing."
           } > "${RELEASE_NOTES}"
 
           git tag --force nightly "${GITHUB_SHA}"
@@ -214,17 +148,14 @@ jobs:
               --prerelease \
               --latest=false
             gh release upload nightly \
-              "${EXPORT_PATH}/${IPA_NAME}" \
+              "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}" \
+              "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}.sha256" \
               --clobber
-            gh release delete-asset nightly \
-              EasyTier-nightly-unsigned.ipa \
-              --yes 2>/dev/null || true
-            gh release delete-asset nightly \
-              EasyTier-nightly-unsigned.ipa.sha256 \
-              --yes 2>/dev/null || true
+            gh release delete-asset nightly EasyTier-nightly-trollstore.ipa --yes 2>/dev/null || true
           else
             gh release create nightly \
-              "${EXPORT_PATH}/${IPA_NAME}" \
+              "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}" \
+              "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}.sha256" \
               --verify-tag \
               --target "${GITHUB_SHA}" \
               --title "EasyTier Nightly (${SHORT_SHA})" \
