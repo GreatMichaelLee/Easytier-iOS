@@ -16,7 +16,6 @@ concurrency:
 env:
   SCHEME: EasyTier
   BUILD_CONFIGURATION: Release
-  UNSIGNED_IPA_NAME: EasyTier-nightly-unsigned.ipa
   TEAM_ID: Z78N6GQ84P
 
 jobs:
@@ -28,6 +27,23 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Compute build version
+        shell: bash
+        run: |
+          set -euo pipefail
+          # <date>-<short hash> of this repo's own history, same shape the
+          # core/GUI builds use (see easytier-build-playbook.md). Replaces
+          # GITHUB_RUN_NUMBER, which was just an opaque incrementing counter
+          # with no way to tell which commit/day a build came from.
+          DATE=$(git log -1 --format=%cd --date=format:%Y%m%d)
+          HASH=$(git rev-parse --short=8 HEAD)
+          BUILD_VERSION="${DATE}-${HASH}"
+          echo "BUILD_VERSION=${BUILD_VERSION}" >> "${GITHUB_ENV}"
+          # Filename mirrors the Windows/Android convention (see
+          # easytier-build-playbook.md): "<product>-<version>.<ext>", all
+          # hyphens, no platform tag, extension alone says what it's for.
+          echo "UNSIGNED_IPA_NAME=easytier-${BUILD_VERSION}.ipa" >> "${GITHUB_ENV}"
 
       - name: Set up private core repo access (cargo -> GreatMichaelLee/Easytier)
         env:
@@ -87,7 +103,7 @@ jobs:
             AD_HOC_CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY="" \
             DEVELOPMENT_TEAM="${TEAM_ID}" \
-            CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}"
+            CURRENT_PROJECT_VERSION="${BUILD_VERSION}"
 
       - name: Package unsigned IPA
         shell: bash
@@ -108,10 +124,10 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: EasyTier-nightly-unsigned-${{ github.run_number }}
+          name: easytier-${{ env.BUILD_VERSION }}
           path: |
-            ${{ runner.temp }}/export/EasyTier-nightly-unsigned.ipa
-            ${{ runner.temp }}/export/EasyTier-nightly-unsigned.ipa.sha256
+            ${{ runner.temp }}/export/${{ env.UNSIGNED_IPA_NAME }}
+            ${{ runner.temp }}/export/${{ env.UNSIGNED_IPA_NAME }}.sha256
           if-no-files-found: error
           retention-days: 14
 

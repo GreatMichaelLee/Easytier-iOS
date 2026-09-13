@@ -54,10 +54,17 @@ struct SettingsView<Manager: NetworkExtensionManagerProtocol>: View {
         var overwriteDestinations: Set<URL>
     }
 
+    // CFBundleShortVersionString ("MARKETING_VERSION") was a static "1.1" that
+    // never once tracked an actual change here -- it was bumped from 1.0 to
+    // 1.1 a single time, long before any of our private-fork work, and never
+    // again. Dropping the "version (build)" split entirely: CFBundleVersion
+    // alone (set at build time to "<date>-<git short hash>" of this repo, see
+    // .github/workflows/nightly.yml) now carries all the real information, in
+    // the same <date>-<hash> shape the core/GUI builds use (see
+    // easytier-build-playbook.md), just without a leading package version --
+    // this repo has no analogous "official" numbered release.
     var appVersion: String {
-        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? String(localized: "not_available")
-        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? String(localized: "not_available")
-        return "\(version) (\(build))"
+        Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? String(localized: "not_available")
     }
 
     var body: some View {
