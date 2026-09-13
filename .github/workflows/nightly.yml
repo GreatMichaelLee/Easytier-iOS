@@ -165,6 +165,21 @@ jobs:
               --notes-file "${RELEASE_NOTES}" \
               --prerelease \
               --latest=false
+
+            # The IPA filename embeds <date>-<hash>, which changes on every commit
+            # (unlike Windows/Android, where a same-day rebuild reuses the same
+            # name and --clobber below just overwrites it in place). Without this,
+            # every push leaves the previous build's ipa/sha256 behind forever --
+            # caught 2026-09-13 with two different builds' files sitting on the
+            # rolling "nightly" release at once. Delete every old easytier-*.ipa*
+            # asset except the one we're about to upload.
+            gh release view nightly --json assets -q '.assets[].name' | \
+              grep -E '^easytier-[0-9]{8}-[0-9a-f]{8}\.ipa(\.sha256)?$' | \
+              grep -v -F "${UNSIGNED_IPA_NAME}" | \
+              while read -r old; do
+                gh release delete-asset nightly "$old" --yes 2>/dev/null || true
+              done
+
             gh release upload nightly \
               "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}" \
               "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}.sha256" \
