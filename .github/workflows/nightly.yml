@@ -40,6 +40,8 @@ jobs:
           HASH=$(git rev-parse --short=8 HEAD)
           BUILD_VERSION="${DATE}-${HASH}"
           echo "BUILD_VERSION=${BUILD_VERSION}" >> "${GITHUB_ENV}"
+          echo "BUILD_DATE=${DATE}" >> "${GITHUB_ENV}"
+          echo "BUILD_HASH=${HASH}" >> "${GITHUB_ENV}"
           # Filename mirrors the Windows/Android convention (see
           # easytier-build-playbook.md): "<product>-<version>.<ext>", all
           # hyphens, no platform tag, extension alone says what it's for.
@@ -159,7 +161,7 @@ jobs:
           if gh release view nightly >/dev/null 2>&1; then
             gh release edit nightly \
               --target "${GITHUB_SHA}" \
-              --title "EasyTier Nightly (${SHORT_SHA})" \
+              --title "iOS build ${BUILD_DATE} (${BUILD_HASH})" \
               --notes-file "${RELEASE_NOTES}" \
               --prerelease \
               --latest=false
@@ -174,7 +176,7 @@ jobs:
               "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}.sha256" \
               --verify-tag \
               --target "${GITHUB_SHA}" \
-              --title "EasyTier Nightly (${SHORT_SHA})" \
+              --title "iOS build ${BUILD_DATE} (${BUILD_HASH})" \
               --notes-file "${RELEASE_NOTES}" \
               --prerelease \
               --latest=false
