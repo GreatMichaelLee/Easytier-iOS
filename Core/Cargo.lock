@@ -1114,8 +1114,8 @@ dependencies = [
 
 [[package]]
 name = "easytier"
-version = "2.6.4"
-source = "git+https://github.com/GreatMichaelLee/Easytier.git?branch=main#881888c8cf9385368381907a093469e038b81c53"
+version = "2.7.0"
+source = "git+https://github.com/GreatMichaelLee/Easytier.git?branch=main#d7799d62f8a96d5ac85453e194e3493a6fca2152"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -1220,8 +1220,8 @@ dependencies = [
 
 [[package]]
 name = "easytier-core"
-version = "2.6.4"
-source = "git+https://github.com/GreatMichaelLee/Easytier.git?branch=main#881888c8cf9385368381907a093469e038b81c53"
+version = "2.7.0"
+source = "git+https://github.com/GreatMichaelLee/Easytier.git?branch=main#d7799d62f8a96d5ac85453e194e3493a6fca2152"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1305,8 +1305,8 @@ dependencies = [
 
 [[package]]
 name = "easytier-proto"
-version = "2.6.4"
-source = "git+https://github.com/GreatMichaelLee/Easytier.git?branch=main#881888c8cf9385368381907a093469e038b81c53"
+version = "2.7.0"
+source = "git+https://github.com/GreatMichaelLee/Easytier.git?branch=main#d7799d62f8a96d5ac85453e194e3493a6fca2152"
 dependencies = [
  "anyhow",
  "async-trait",
