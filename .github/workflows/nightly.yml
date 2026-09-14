@@ -4,6 +4,11 @@ on:
   push:
     branches:
       - main
+  # 每天定时检查 main 有没有新提交(不管是直接push还是从官方合并进来的，只要
+  # HEAD 变了就算)，没有就跳过整个build job，不浪费CI/不产生空release。
+  # 跟私仓那边 builder/nightly.sh 的 crontab 错开，避免同时段发布造成混乱。
+  schedule:
+    - cron: '0 18 * * *' # UTC 18:00 = 北京时间凌晨02:00
   workflow_dispatch:
 
 permissions:
@@ -19,8 +24,39 @@ env:
   TEAM_ID: Z78N6GQ84P
 
 jobs:
+  # 只在定时触发时才需要判断"有没有变化"——push/手动触发本身就代表"该跑"，
+  # 不需要额外判断。拿现有的 nightly tag(上次成功发布release时打的)当水位线，
+  # 不用额外维护一个新的state文件。
+  check-for-changes:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.check.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          CURRENT_SHA=$(git rev-parse HEAD)
+          LAST_SHA=$(git rev-parse refs/tags/nightly 2>/dev/null || echo "")
+          if [ "$CURRENT_SHA" = "$LAST_SHA" ]; then
+            echo "no changes since last nightly release ($CURRENT_SHA), skip"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "new commits: ${LAST_SHA:-<none>} -> $CURRENT_SHA"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build-and-release:
     name: Build and publish unsigned IPA
+    needs: [check-for-changes]
+    if: |
+      always() &&
+      (needs.check-for-changes.result == 'skipped' || needs.check-for-changes.outputs.has_changes == 'true')
     runs-on: macos-26
     timeout-minutes: 90
 
