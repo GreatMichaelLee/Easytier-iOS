@@ -1,9 +1,9 @@
-name: Nightly
+name: Nightly (iPad)
 
 on:
   push:
     branches:
-      - main
+      - ipad-jialiang-cert
   # 每天定时检查 main 有没有新提交(不管是直接push还是从官方合并进来的，只要
   # HEAD 变了就算)，没有就跳过整个build job，不浪费CI/不产生空release。
   # 跟私仓那边 builder/nightly.sh 的 crontab 错开，避免同时段发布造成混乱。
@@ -15,13 +15,13 @@ permissions:
   contents: write
 
 concurrency:
-  group: nightly
+  group: nightly-ipad
   cancel-in-progress: true
 
 env:
   SCHEME: EasyTier
   BUILD_CONFIGURATION: Release
-  TEAM_ID: Z78N6GQ84P
+  TEAM_ID: 98GVSDB894
 
 jobs:
   # 只在定时触发时才需要判断"有没有变化"——push/手动触发本身就代表"该跑"，
@@ -42,7 +42,7 @@ jobs:
         run: |
           set -euo pipefail
           CURRENT_SHA=$(git rev-parse HEAD)
-          LAST_SHA=$(git rev-parse refs/tags/nightly 2>/dev/null || echo "")
+          LAST_SHA=$(git rev-parse refs/tags/nightly-ipad 2>/dev/null || echo "")
           if [ "$CURRENT_SHA" = "$LAST_SHA" ]; then
             echo "no changes since last nightly release ($CURRENT_SHA), skip"
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
@@ -191,11 +191,11 @@ jobs:
             echo "> \`${UNSIGNED_IPA_NAME}\` is genuinely unsigned -- sign it yourself with your own Apple Developer account/provisioning profile (Xcode, AltStore, Sideloadly, etc.) before installing."
           } > "${RELEASE_NOTES}"
 
-          git tag --force nightly "${GITHUB_SHA}"
-          git push --force origin refs/tags/nightly
+          git tag --force nightly-ipad "${GITHUB_SHA}"
+          git push --force origin refs/tags/nightly-ipad
 
-          if gh release view nightly >/dev/null 2>&1; then
-            gh release edit nightly \
+          if gh release view nightly-ipad >/dev/null 2>&1; then
+            gh release edit nightly-ipad \
               --target "${GITHUB_SHA}" \
               --title "iOS build ${BUILD_DATE} (${BUILD_HASH})" \
               --notes-file "${RELEASE_NOTES}" \
@@ -209,20 +209,20 @@ jobs:
             # caught 2026-09-13 with two different builds' files sitting on the
             # rolling "nightly" release at once. Delete every old easytier-*.ipa*
             # asset except the one we're about to upload.
-            gh release view nightly --json assets -q '.assets[].name' | \
+            gh release view nightly-ipad --json assets -q '.assets[].name' | \
               grep -E '^easytier-[0-9]{8}-[0-9a-f]{8}\.ipa(\.sha256)?$' | \
               grep -v -F "${UNSIGNED_IPA_NAME}" | \
               while read -r old; do
-                gh release delete-asset nightly "$old" --yes 2>/dev/null || true
+                gh release delete-asset nightly-ipad "$old" --yes 2>/dev/null || true
               done
 
-            gh release upload nightly \
+            gh release upload nightly-ipad \
               "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}" \
               "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}.sha256" \
               --clobber
-            gh release delete-asset nightly EasyTier-nightly-trollstore.ipa --yes 2>/dev/null || true
+            gh release delete-asset nightly-ipad EasyTier-nightly-trollstore.ipa --yes 2>/dev/null || true
           else
-            gh release create nightly \
+            gh release create nightly-ipad \
               "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}" \
               "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}.sha256" \
               --verify-tag \
