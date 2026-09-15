@@ -20,9 +20,9 @@ iOS/macOS 版 EasyTier 原生客户端，适用于去中心化虚拟专用网络
   <img src="https://developer.apple.com/assets/elements/badges/download-on-the-app-store.svg" alt="在 App Store 下载" height="40">
 </a>
 
-### TrollStore IPA
+### Nightly 构建
 
-每次提交推送到 `main` 分支时，仓库都会自动更新供 TrollStore 安装的 Nightly Release IPA。构建不需要 Apple 凭据，并会使用项目所需的网络扩展与 App Group entitlements 进行 ad-hoc 签名。
+每次提交推送到 `main` 分支时，以及每天定时检查一次(如果 `main` 自上次发布以来有新提交)，仓库都会发布一个完全未签名的 Nightly Release IPA。安装前请用你自己的 Apple 开发者账号/描述文件(Xcode、AltStore、Sideloadly 等)自行签名。
 
 ### 许可证
 
