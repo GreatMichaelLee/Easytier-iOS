@@ -81,7 +81,9 @@ jobs:
           # Filename mirrors the Windows/Android convention (see
           # easytier-build-playbook.md): "<product>-<version>.<ext>", all
           # hyphens, no platform tag, extension alone says what it's for.
-          echo "UNSIGNED_IPA_NAME=easytier-${BUILD_VERSION}.ipa" >> "${GITHUB_ENV}"
+          # iOS has two certs -> two device-specific builds now, so a device
+          # tag goes in right after the product name to tell them apart.
+          echo "UNSIGNED_IPA_NAME=easytier-ipad-${BUILD_VERSION}.ipa" >> "${GITHUB_ENV}"
 
       - name: Set up private core repo access (cargo -> GreatMichaelLee/Easytier)
         env:
@@ -210,7 +212,7 @@ jobs:
             # rolling "nightly" release at once. Delete every old easytier-*.ipa*
             # asset except the one we're about to upload.
             gh release view nightly-ipad --json assets -q '.assets[].name' | \
-              grep -E '^easytier-[0-9]{8}-[0-9a-f]{8}\.ipa(\.sha256)?$' | \
+              grep -E '^easytier-ipad-[0-9]{8}-[0-9a-f]{8}\.ipa(\.sha256)?$' | \
               grep -v -F "${UNSIGNED_IPA_NAME}" | \
               while read -r old; do
                 gh release delete-asset nightly-ipad "$old" --yes 2>/dev/null || true
