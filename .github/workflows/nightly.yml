@@ -212,12 +212,14 @@ jobs:
             # caught 2026-09-13 with two different builds' files sitting on the
             # rolling "nightly" release at once. Delete every old easytier-*.ipa*
             # asset except the one we're about to upload.
-            gh release view nightly --json assets -q '.assets[].name' | \
+            OLD_ASSETS=$(gh release view nightly --json assets -q '.assets[].name' | \
               grep -E '^easytier-iphone-[0-9]{8}-[0-9a-f]{8}\.ipa(\.sha256)?$' | \
-              grep -v -F "${UNSIGNED_IPA_NAME}" | \
+              grep -v -F "${UNSIGNED_IPA_NAME}" || true)
+            if [ -n "${OLD_ASSETS}" ]; then
               while read -r old; do
                 gh release delete-asset nightly "$old" --yes 2>/dev/null || true
-              done
+              done <<< "${OLD_ASSETS}"
+            fi
 
             gh release upload nightly \
               "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}" \
