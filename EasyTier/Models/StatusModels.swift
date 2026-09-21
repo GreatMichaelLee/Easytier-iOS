@@ -295,8 +295,8 @@ struct NetworkStatus: Codable {
 
     struct TunnelInfo: Codable, Hashable {
         var tunnelType: String
-        var localAddr: Url
-        var remoteAddr: Url
+        var localAddr: Url?
+        var remoteAddr: Url?
 
         enum CodingKeys: String, CodingKey {
             case tunnelType = "tunnel_type"
@@ -361,4 +361,258 @@ struct NetworkStatus: Codable {
     var displayTxBytes: Int { sessionTxBytes ?? sum(of: \.txBytes) }
     var displayRxPackets: Int { sessionRxPackets ?? sum(of: \.rxPackets) }
     var displayTxPackets: Int { sessionTxPackets ?? sum(of: \.txPackets) }
+}
+
+// MARK: - Defensive protobuf-JSON decoding
+//
+// Protobuf JSON omits scalar/message fields whose value equals the protobuf
+// default (0, false, "", an empty list, or an unset message), and represents
+// 64-bit integer counters as JSON strings to avoid precision loss. Plain
+// synthesized Codable conformances assume every field is always present with
+// its native JSON type/shape, so decoding throws the moment any field
+// happens to sit at its default -- this is what caused the "peers[].
+// default_conn_id: {}" crash fixed earlier for just that one field. Restore
+// the defaults explicitly, for every field in this file that can plausibly
+// hit the same shape. Independently adapted from the equivalent fix upstream
+// EasyTier-iOS carries (commit a9d0628) -- not cherry-picked, since upstream
+// implements it against a different Core dependency/API than ours.
+
+private struct ProtobufInteger<Value: FixedWidthInteger & Decodable>: Decodable {
+    let value: Value
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let string = try? container.decode(String.self) {
+            guard let value = Value(string) else {
+                throw DecodingError.dataCorruptedError(in: container, debugDescription: "Invalid or out-of-range integer")
+            }
+            self.value = value
+        } else {
+            value = try container.decode(Value.self)
+        }
+    }
+}
+
+private extension KeyedDecodingContainer {
+    func decodeCounter(forKey key: Key) throws -> Int {
+        let value = try decodeIfPresent(ProtobufInteger<UInt64>.self, forKey: key)?.value ?? 0
+        guard let counter = Int(exactly: value) else {
+            throw DecodingError.dataCorruptedError(forKey: key, in: self, debugDescription: "Counter exceeds Int range")
+        }
+        return counter
+    }
+}
+
+extension NetworkStatus {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        devName = try container.decodeIfPresent(String.self, forKey: .devName) ?? ""
+        myNodeInfo = try container.decodeIfPresent(MyNodeInfo.self, forKey: .myNodeInfo)
+        events = try container.decodeIfPresent([String].self, forKey: .events) ?? []
+        routes = try container.decodeIfPresent([Route].self, forKey: .routes) ?? []
+        peers = try container.decodeIfPresent([PeerInfo].self, forKey: .peers) ?? []
+        peerRoutePairs = try container.decodeIfPresent([PeerRoutePair].self, forKey: .peerRoutePairs) ?? []
+        running = try container.decodeIfPresent(Bool.self, forKey: .running) ?? false
+        errorMsg = try container.decodeIfPresent(String.self, forKey: .errorMsg)
+        sessionRxBytes = try container.decodeIfPresent(ProtobufInteger<Int>.self, forKey: .sessionRxBytes)?.value
+        sessionTxBytes = try container.decodeIfPresent(ProtobufInteger<Int>.self, forKey: .sessionTxBytes)?.value
+        sessionRxPackets = try container.decodeIfPresent(ProtobufInteger<Int>.self, forKey: .sessionRxPackets)?.value
+        sessionTxPackets = try container.decodeIfPresent(ProtobufInteger<Int>.self, forKey: .sessionTxPackets)?.value
+    }
+}
+
+// protoc's default JSON mapping represents enums by their string variant
+// name, not their integer value -- accept either so this doesn't depend on
+// which serializer config the core happens to build with.
+extension NetworkStatus.NATType {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let name = try? container.decode(String.self) {
+            switch name {
+            case "Unknown": self = .unknown
+            case "OpenInternet": self = .openInternet
+            case "NoPAT": self = .noPAT
+            case "FullCone": self = .fullCone
+            case "Restricted": self = .restricted
+            case "PortRestricted": self = .portRestricted
+            case "Symmetric": self = .symmetric
+            case "SymUdpFirewall": self = .symUDPFirewall
+            case "SymmetricEasyInc": self = .symmetricEasyInc
+            case "SymmetricEasyDec": self = .symmetricEasyDec
+            default:
+                throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unknown NAT type name")
+            }
+        } else {
+            let rawValue = try container.decode(Int.self)
+            guard let value = Self(rawValue: rawValue) else {
+                throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unknown NAT type value")
+            }
+            self = value
+        }
+    }
+}
+
+extension NetworkStatus.UUID {
+    private enum CodingKeys: String, CodingKey { case part1, part2, part3, part4 }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        part1 = try container.decodeIfPresent(UInt32.self, forKey: .part1) ?? 0
+        part2 = try container.decodeIfPresent(UInt32.self, forKey: .part2) ?? 0
+        part3 = try container.decodeIfPresent(UInt32.self, forKey: .part3) ?? 0
+        part4 = try container.decodeIfPresent(UInt32.self, forKey: .part4) ?? 0
+    }
+}
+
+extension NetworkStatus.PeerFeatureFlag {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        isPublicServer = try container.decodeIfPresent(Bool.self, forKey: .isPublicServer) ?? false
+        avoidRelayData = try container.decodeIfPresent(Bool.self, forKey: .avoidRelayData) ?? false
+        kcpInput = try container.decodeIfPresent(Bool.self, forKey: .kcpInput) ?? false
+        noRelayKcp = try container.decodeIfPresent(Bool.self, forKey: .noRelayKcp) ?? false
+        supportConnListSync = try container.decodeIfPresent(Bool.self, forKey: .supportConnListSync) ?? false
+        quicInput = try container.decodeIfPresent(Bool.self, forKey: .quicInput) ?? false
+        noRelayQuic = try container.decodeIfPresent(Bool.self, forKey: .noRelayQuic) ?? false
+    }
+}
+
+extension NetworkStatus.IPv4Addr {
+    private enum CodingKeys: String, CodingKey { case addr }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        addr = try container.decodeIfPresent(UInt32.self, forKey: .addr) ?? 0
+    }
+}
+
+extension NetworkStatus.IPv4CIDR {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        address = try container.decode(NetworkStatus.IPv4Addr.self, forKey: .address)
+        networkLength = try container.decodeIfPresent(Int.self, forKey: .networkLength) ?? 0
+    }
+}
+
+extension NetworkStatus.IPv6Addr {
+    private enum CodingKeys: String, CodingKey { case part1, part2, part3, part4 }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        part1 = try container.decodeIfPresent(UInt32.self, forKey: .part1) ?? 0
+        part2 = try container.decodeIfPresent(UInt32.self, forKey: .part2) ?? 0
+        part3 = try container.decodeIfPresent(UInt32.self, forKey: .part3) ?? 0
+        part4 = try container.decodeIfPresent(UInt32.self, forKey: .part4) ?? 0
+    }
+}
+
+extension NetworkStatus.IPv6CIDR {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        address = try container.decode(NetworkStatus.IPv6Addr.self, forKey: .address)
+        networkLength = try container.decodeIfPresent(Int.self, forKey: .networkLength) ?? 0
+    }
+}
+
+extension NetworkStatus.Url {
+    private enum CodingKeys: String, CodingKey { case url }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        url = try container.decodeIfPresent(String.self, forKey: .url) ?? ""
+    }
+}
+
+extension NetworkStatus.MyNodeInfo {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        virtualIPv4 = try container.decodeIfPresent(NetworkStatus.IPv4CIDR.self, forKey: .virtualIPv4)
+        virtualIPv6 = try container.decodeIfPresent(String.self, forKey: .virtualIPv6)
+        hostname = try container.decodeIfPresent(String.self, forKey: .hostname) ?? ""
+        version = try container.decodeIfPresent(String.self, forKey: .version) ?? ""
+        ips = try container.decodeIfPresent(IPList.self, forKey: .ips)
+        stunInfo = try container.decodeIfPresent(NetworkStatus.STUNInfo.self, forKey: .stunInfo)
+        listeners = try container.decodeIfPresent([NetworkStatus.Url].self, forKey: .listeners)
+        vpnPortalCfg = try container.decodeIfPresent(String.self, forKey: .vpnPortalCfg)
+        peerID = try container.decodeIfPresent(Int.self, forKey: .peerID)
+    }
+}
+
+extension NetworkStatus.STUNInfo {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        udpNATType = try container.decodeIfPresent(NetworkStatus.NATType.self, forKey: .udpNATType) ?? .unknown
+        tcpNATType = try container.decodeIfPresent(NetworkStatus.NATType.self, forKey: .tcpNATType) ?? .unknown
+        lastUpdateTime = TimeInterval(try container.decodeIfPresent(ProtobufInteger<Int64>.self, forKey: .lastUpdateTime)?.value ?? 0)
+        publicIPs = try container.decodeIfPresent([String].self, forKey: .publicIPs) ?? []
+        minPort = try container.decodeIfPresent(Int.self, forKey: .minPort)
+        maxPort = try container.decodeIfPresent(Int.self, forKey: .maxPort)
+    }
+}
+
+extension NetworkStatus.Route {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        peerId = try container.decodeIfPresent(Int.self, forKey: .peerId) ?? 0
+        ipv4Addr = try container.decodeIfPresent(NetworkStatus.IPv4CIDR.self, forKey: .ipv4Addr)
+        ipv6Addr = try container.decodeIfPresent(NetworkStatus.IPv6CIDR.self, forKey: .ipv6Addr)
+        nextHopPeerId = try container.decodeIfPresent(Int.self, forKey: .nextHopPeerId) ?? 0
+        cost = try container.decodeIfPresent(Int.self, forKey: .cost) ?? 0
+        pathLatency = try container.decodeIfPresent(Int.self, forKey: .pathLatency) ?? 0
+        proxyCIDRs = try container.decodeIfPresent([String].self, forKey: .proxyCIDRs) ?? []
+        hostname = try container.decodeIfPresent(String.self, forKey: .hostname) ?? ""
+        stunInfo = try container.decodeIfPresent(NetworkStatus.STUNInfo.self, forKey: .stunInfo)
+        instId = try container.decodeIfPresent(String.self, forKey: .instId) ?? ""
+        version = try container.decodeIfPresent(String.self, forKey: .version) ?? ""
+        nextHopPeerIdLatencyFirst = try container.decodeIfPresent(UInt.self, forKey: .nextHopPeerIdLatencyFirst)
+        costLatencyFirst = try container.decodeIfPresent(Int.self, forKey: .costLatencyFirst)
+        pathLatencyLatencyFirst = try container.decodeIfPresent(Int.self, forKey: .pathLatencyLatencyFirst)
+        featureFlag = try container.decodeIfPresent(NetworkStatus.PeerFeatureFlag.self, forKey: .featureFlag)
+    }
+}
+
+extension NetworkStatus.PeerInfo {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        peerId = try container.decodeIfPresent(Int.self, forKey: .peerId) ?? 0
+        conns = try container.decodeIfPresent([NetworkStatus.PeerConnInfo].self, forKey: .conns) ?? []
+        defaultConnId = try container.decodeIfPresent(NetworkStatus.UUID.self, forKey: .defaultConnId)
+        directlyConnectedConns = try container.decodeIfPresent([NetworkStatus.UUID].self, forKey: .directlyConnectedConns) ?? []
+    }
+}
+
+extension NetworkStatus.PeerConnInfo {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        connId = try container.decodeIfPresent(String.self, forKey: .connId) ?? ""
+        myPeerId = try container.decodeIfPresent(Int.self, forKey: .myPeerId) ?? 0
+        isClient = try container.decodeIfPresent(Bool.self, forKey: .isClient) ?? false
+        peerId = try container.decodeIfPresent(Int.self, forKey: .peerId) ?? 0
+        features = try container.decodeIfPresent([String].self, forKey: .features) ?? []
+        tunnel = try container.decodeIfPresent(NetworkStatus.TunnelInfo.self, forKey: .tunnel)
+        stats = try container.decodeIfPresent(NetworkStatus.PeerConnStats.self, forKey: .stats)
+        lossRate = try container.decodeIfPresent(Double.self, forKey: .lossRate) ?? 0
+        networkName = try container.decodeIfPresent(String.self, forKey: .networkName)
+        isClosed = try container.decodeIfPresent(Bool.self, forKey: .isClosed)
+    }
+}
+
+extension NetworkStatus.TunnelInfo {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        tunnelType = try container.decodeIfPresent(String.self, forKey: .tunnelType) ?? ""
+        localAddr = try container.decodeIfPresent(NetworkStatus.Url.self, forKey: .localAddr)
+        remoteAddr = try container.decodeIfPresent(NetworkStatus.Url.self, forKey: .remoteAddr)
+    }
+}
+
+extension NetworkStatus.PeerConnStats {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        rxBytes = try container.decodeCounter(forKey: .rxBytes)
+        txBytes = try container.decodeCounter(forKey: .txBytes)
+        rxPackets = try container.decodeCounter(forKey: .rxPackets)
+        txPackets = try container.decodeCounter(forKey: .txPackets)
+        latencyUs = try container.decodeCounter(forKey: .latencyUs)
+    }
 }

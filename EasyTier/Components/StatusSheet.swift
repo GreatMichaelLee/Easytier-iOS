@@ -230,8 +230,8 @@ struct PeerConnDetailSheet: View {
 
                                 if let tunnel = conn.tunnel {
                                     LabeledContent("tunnel_type", value: tunnel.tunnelType.uppercased())
-                                    LabeledContent("local_addr", value: tunnel.localAddr.url)
-                                    LabeledContent("remote_addr", value: tunnel.remoteAddr.url)
+                                    LabeledContent("local_addr", value: tunnel.localAddr?.url ?? "-")
+                                    LabeledContent("remote_addr", value: tunnel.remoteAddr?.url ?? "-")
                                 }
 
                                 if let stats = conn.stats {
