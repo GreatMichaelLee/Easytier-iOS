@@ -130,7 +130,8 @@ func buildIPv4Routes(info: RunningInfo?, options: EasyTierOptions) -> [NEIPv4Rou
 }
 
 func splitIPv6CIDR(_ s: String) -> (String, Int)? {
-    let parts = s.split(separator: "/")
+    let normalized = s.contains("/") ? s : s + "/128"
+    let parts = normalized.split(separator: "/")
     guard parts.count == 2,
           let prefix = Int(parts[1]), (0...128).contains(prefix),
           IPv6Address(String(parts[0])) != nil
