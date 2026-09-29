@@ -267,6 +267,16 @@ jobs:
               "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}.sha256" \
               --clobber
           else
+            # 2026-09-29 real-run bug: the old workflow's release was always
+            # --prerelease (it never tried to be GitHub's native "latest" --
+            # that concept didn't exist for the old single-rolling-tag
+            # model). Carried that flag over here at first without noticing
+            # it's mutually exclusive with the `--latest` this step sets
+            # right below -- first live run failed with "HTTP 422: Latest
+            # release cannot be draft or prerelease." Dropped --prerelease;
+            # these builds are still clearly labeled unsigned/nightly in the
+            # notes above, and this repo has no separate "real" signed
+            # release for --latest to wrongly steal prominence from.
             gh release create "${RELEASE_TAG}" \
               "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}" \
               "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}.sha256" \
@@ -274,7 +284,6 @@ jobs:
               --target "${GITHUB_SHA}" \
               --title "EasyTier iOS Build ${BUILD_NUM_PADDED}" \
               --notes-file "${RELEASE_NOTES}" \
-              --prerelease \
               --latest=false
           fi
           gh release edit "${RELEASE_TAG}" --latest
