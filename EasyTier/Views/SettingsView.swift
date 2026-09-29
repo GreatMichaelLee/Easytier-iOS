@@ -58,11 +58,15 @@ struct SettingsView<Manager: NetworkExtensionManagerProtocol>: View {
     // never once tracked an actual change here -- it was bumped from 1.0 to
     // 1.1 a single time, long before any of our private-fork work, and never
     // again. Dropping the "version (build)" split entirely: CFBundleVersion
-    // alone (set at build time to "<date>-<git short hash>" of this repo, see
-    // .github/workflows/nightly.yml) now carries all the real information, in
-    // the same <date>-<hash> shape the core/GUI builds use (see
-    // easytier-build-playbook.md), just without a leading package version --
-    // this repo has no analogous "official" numbered release.
+    // alone (set at build time, see .github/workflows/nightly.yml) now
+    // carries all the real information: "<date>-<git short hash>-Build <NNN>",
+    // the same shape the core/GUI builds use (see easytier-build-playbook.md)
+    // plus a Build number shared across nothing else -- this repo has its
+    // own independent easytier-ios-build-<N> counter (2026-09-29), separate
+    // from the main repo's, since its release cadence floats on tip-of-main
+    // of the core crate rather than being released in lockstep with
+    // Windows/Android. No leading package version either way -- this repo
+    // has no analogous "official" numbered release.
     var appVersion: String {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? String(localized: "not_available")
     }

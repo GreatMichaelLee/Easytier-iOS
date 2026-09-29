@@ -42,9 +42,13 @@ jobs:
         run: |
           set -euo pipefail
           CURRENT_SHA=$(git rev-parse HEAD)
-          LAST_SHA=$(git rev-parse refs/tags/nightly 2>/dev/null || echo "")
+          # 2026-09-29: 以前拿 "nightly" 这个浮动 release 标签当水位线，但那个
+          # 标签现在被拆掉了（改成每个 build 号一页、见下面 build-number 那段），
+          # 换一个专门只用来记"上次检查到的 commit"、不代表任何 release 的独立
+          # 标签，两件事不再绑在一起。
+          LAST_SHA=$(git rev-parse refs/tags/nightly-last-checked 2>/dev/null || echo "")
           if [ "$CURRENT_SHA" = "$LAST_SHA" ]; then
-            echo "no changes since last nightly release ($CURRENT_SHA), skip"
+            echo "no changes since last nightly check ($CURRENT_SHA), skip"
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
             echo "new commits: ${LAST_SHA:-<none>} -> $CURRENT_SHA"
@@ -64,27 +68,82 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Allocate build number
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 2026-09-29: 用户要求跟主仓库（GreatMichaelLee/Easytier）一样加一个
+          # 跨发布共享的 Build 号。这里用的是独立的一套计数器
+          # (easytier-ios-build-<N>，不是主仓库的 easytier-build-<N>)——这个仓库
+          # 是完全独立的发布节奏（core crate 是浮动拉 main 的 tip，不是跟主仓库
+          # 某个具体 commit 锁定发布），跟 Windows/Android 共用一个计数器只会两边
+          # 都产生confusing的号码跳跃，没有实际意义。
+          #
+          # 计数器实现原理跟主仓库 builder/lib-build-number.sh 一致：带注释标签
+          # 存最大号，同一个 commit 重新发布复用原号，删 release 不删标签所以号
+          # 不会倒退。
+          PREFIX="easytier-ios-build-"
+          git fetch origin --tags --quiet
+          COMMIT="${GITHUB_SHA}"
+          MAX_N=0
+          FOUND_N=""
+          for tag in $(git tag -l "${PREFIX}*"); do
+            n="${tag#$PREFIX}"
+            case "$n" in ''|*[!0-9]*) continue ;; esac
+            n_dec=$((10#$n))
+            [ "$n_dec" -gt "$MAX_N" ] && MAX_N="$n_dec"
+            tag_commit="$(git rev-list -n1 "$tag" 2>/dev/null || true)"
+            if [ "$tag_commit" = "$COMMIT" ]; then
+              FOUND_N="$n_dec"
+            fi
+          done
+          if [ -n "$FOUND_N" ]; then
+            BUILD_NUM="$FOUND_N"
+            echo "commit already has ${PREFIX}${BUILD_NUM}, reusing"
+          else
+            BUILD_NUM=$((MAX_N + 1))
+            NEW_TAG="${PREFIX}${BUILD_NUM}"
+            git tag -a "$NEW_TAG" "$COMMIT" -m "EasyTier iOS nightly build $BUILD_NUM"
+            git push origin "refs/tags/$NEW_TAG"
+            echo "allocated new ${NEW_TAG}"
+          fi
+          printf -v BUILD_NUM_PADDED '%03d' "$BUILD_NUM"
+          echo "BUILD_NUM=${BUILD_NUM}" >> "${GITHUB_ENV}"
+          echo "BUILD_NUM_PADDED=${BUILD_NUM_PADDED}" >> "${GITHUB_ENV}"
+
       - name: Compute build version
         shell: bash
         run: |
           set -euo pipefail
-          # <date>-<short hash> of this repo's own history, same shape the
-          # core/GUI builds use (see easytier-build-playbook.md). Replaces
-          # GITHUB_RUN_NUMBER, which was just an opaque incrementing counter
-          # with no way to tell which commit/day a build came from.
+          # <date>-<short hash>-Build <NNN>, same shape the core/GUI builds
+          # use (see easytier-build-playbook.md) plus the Build number from
+          # the step above. Unlike HomeLink/n2n, EasyTier's own version field
+          # has no length limit and no app-name-prefix convention to strip,
+          # so this one string is used everywhere (CURRENT_PROJECT_VERSION,
+          # displayed in Settings) -- no separate "protocol version".
+          #
+          # NOTE: this whole <date>-<hash>-Build<N> scheme is only safe for
+          # this genuinely-unsigned, never-submitted-to-the-App-Store nightly
+          # channel. CURRENT_PROJECT_VERSION on any build that actually goes
+          # through App Store Connect (see ci_scripts/ci_post_clone.sh) must
+          # stay a plain incrementing integer -- Apple's validator rejects
+          # anything else. Not touched here; this workflow is nightly-only.
           DATE=$(git log -1 --format=%cd --date=format:%Y%m%d)
           HASH=$(git rev-parse --short=8 HEAD)
-          BUILD_VERSION="${DATE}-${HASH}"
+          BUILD_VERSION="${DATE}-${HASH}-Build ${BUILD_NUM_PADDED}"
           echo "BUILD_VERSION=${BUILD_VERSION}" >> "${GITHUB_ENV}"
           echo "BUILD_DATE=${DATE}" >> "${GITHUB_ENV}"
           echo "BUILD_HASH=${HASH}" >> "${GITHUB_ENV}"
           # Filename mirrors the Windows/Android convention (see
           # easytier-build-playbook.md): "<product>-<version>.<ext>", all
           # hyphens, no platform tag, extension alone says what it's for.
-          # iOS has two certs -> two device-specific builds now (see the
-          # ipad-jialiang-cert branch), so a device tag goes in right after
-          # the product name to tell them apart.
-          echo "UNSIGNED_IPA_NAME=easytier-iphone-${BUILD_VERSION}.ipa" >> "${GITHUB_ENV}"
+          # Space before the build number is stripped for the filename only
+          # ("...-Build015.ipa" not "...-Build 015.ipa"), display keeps the
+          # space -- explicit ask, mirrors the main repo's publish-release.sh.
+          FILE_VERSION="${BUILD_VERSION// /}"
+          echo "UNSIGNED_IPA_NAME=easytier-iphone-${FILE_VERSION}.ipa" >> "${GITHUB_ENV}"
 
       - name: Set up private core repo access (cargo -> GreatMichaelLee/Easytier)
         env:
@@ -172,15 +231,22 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Update rolling nightly release
+      - name: Publish release (one page per build number, keep newest 4)
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
+          # 2026-09-29 rewrite: replaced the single force-pushed "nightly"
+          # rolling release (old build's ipa always gone once a new one
+          # lands) with one release per Build number, mirroring what the
+          # main EasyTier repo's publish-release.sh now does for
+          # Windows/Android -- keeps the newest few builds individually
+          # downloadable instead of only ever having "whatever's newest".
 
           BUILD_TIME="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           SHORT_SHA="${GITHUB_SHA:0:7}"
+          RELEASE_TAG="easytier-ios-build-${BUILD_NUM}"
           RELEASE_NOTES="${RUNNER_TEMP}/nightly-release-notes.md"
 
           {
@@ -194,46 +260,42 @@ jobs:
             echo "> \`${UNSIGNED_IPA_NAME}\` is genuinely unsigned -- sign it yourself with your own Apple Developer account/provisioning profile (Xcode, AltStore, Sideloadly, etc.) before installing."
           } > "${RELEASE_NOTES}"
 
-          git tag --force nightly "${GITHUB_SHA}"
-          git push --force origin refs/tags/nightly
-
-          if gh release view nightly >/dev/null 2>&1; then
-            gh release edit nightly \
-              --target "${GITHUB_SHA}" \
-              --title "iOS build ${BUILD_DATE} (${BUILD_HASH})" \
-              --notes-file "${RELEASE_NOTES}" \
-              --prerelease \
-              --latest=false
-
-            # The IPA filename embeds <date>-<hash>, which changes on every commit
-            # (unlike Windows/Android, where a same-day rebuild reuses the same
-            # name and --clobber below just overwrites it in place). Without this,
-            # every push leaves the previous build's ipa/sha256 behind forever --
-            # caught 2026-09-13 with two different builds' files sitting on the
-            # rolling "nightly" release at once. Delete every old easytier-*.ipa*
-            # asset except the one we're about to upload.
-            OLD_ASSETS=$(gh release view nightly --json assets -q '.assets[].name' | \
-              grep -E '^easytier-iphone-[0-9]{8}-[0-9a-f]{8}\.ipa(\.sha256)?$' | \
-              grep -v -F "${UNSIGNED_IPA_NAME}" || true)
-            if [ -n "${OLD_ASSETS}" ]; then
-              while read -r old; do
-                gh release delete-asset nightly "$old" --yes 2>/dev/null || true
-              done <<< "${OLD_ASSETS}"
-            fi
-
-            gh release upload nightly \
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "release ${RELEASE_TAG} already exists (re-publishing the same commit) -- uploading into it"
+            gh release upload "${RELEASE_TAG}" \
               "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}" \
               "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}.sha256" \
               --clobber
-            gh release delete-asset nightly EasyTier-nightly-trollstore.ipa --yes 2>/dev/null || true
           else
-            gh release create nightly \
+            gh release create "${RELEASE_TAG}" \
               "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}" \
               "${EXPORT_PATH}/${UNSIGNED_IPA_NAME}.sha256" \
               --verify-tag \
               --target "${GITHUB_SHA}" \
-              --title "iOS build ${BUILD_DATE} (${BUILD_HASH})" \
+              --title "EasyTier iOS Build ${BUILD_NUM_PADDED}" \
               --notes-file "${RELEASE_NOTES}" \
               --prerelease \
               --latest=false
           fi
+          gh release edit "${RELEASE_TAG}" --latest
+
+          # Keep only the newest 4 (latest + 3 older). Deletes the GitHub
+          # *release* (page + assets) only -- never the underlying
+          # easytier-ios-build-<N> git tag, which is the permanent
+          # build-number ledger from the step above and must never regress.
+          PREFIX="easytier-ios-build-"
+          gh release list --limit 200 --json tagName -q ".[] | select(.tagName | startswith(\"$PREFIX\")) | .tagName" \
+            | sed "s/^$PREFIX//" | grep -E '^[0-9]+$' | sort -rn | tail -n +5 \
+            | while read -r n; do
+                old_tag="${PREFIX}${n}"
+                echo "deleting old release beyond keep=4 (tag stays, counter unaffected): ${old_tag}"
+                gh release delete "${old_tag}" --yes || true
+              done
+
+          # Separate, release-agnostic watermark for the check-for-changes
+          # job above -- now that there's no single "nightly" release tag to
+          # implicitly serve that purpose, force-push this dedicated one
+          # instead, moved only on a successful publish (a failed run must
+          # not mark today's commit as "already handled").
+          git tag --force nightly-last-checked "${GITHUB_SHA}"
+          git push --force origin refs/tags/nightly-last-checked
